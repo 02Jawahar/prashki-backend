@@ -12,6 +12,11 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+# The schema must be present before `npm ci`: the postinstall hook runs
+# `prisma generate`, which fails without it. Copying it here also means the
+# generated client is cached in this layer and only rebuilt when the schema or
+# the lockfile changes.
+COPY prisma ./prisma
 RUN npm ci
 
 # --------------------------------------------------------------- build
