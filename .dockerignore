@@ -1,0 +1,27 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# Local embedded PostgreSQL clusters
+.pgdata
+.pgdata-*
+
+# Local uploads — production uses a volume or S3/R2
+uploads/*
+!uploads/.gitkeep
+
+# Secrets. Only .env.example should ever enter an image.
+.env
+.env.local
+.env*.local
+
+.git
+.gitignore
+README.md
+DEPLOYMENT.md
+docker-compose.yml
+*.log
+.vscode
+.idea
+.DS_Store
+Thumbs.db

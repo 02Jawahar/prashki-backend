@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local embedded PostgreSQL clusters
+.pgdata/
+.pgdata-*/
+
+# Uploaded media — production uses a volume or S3/R2
+uploads/*
+!uploads/.gitkeep
+
+# Local environment. Only .env.example is committed — .env holds real secrets.
+.env
+.env.local
+.env*.local
+
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

@@ -1,0 +1,81 @@
+# API + database.
+#
+# The storefront lives in its own repository (prashki-frontend) and is deployed
+# separately, so it is not built here. Point its NEXT_PUBLIC_API_URL at this
+# API's public URL.
+#
+#   docker compose up -d --build
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ecommerce}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ecommerce}?schema=public
+
+      # CORS allow-list. Never '*' — sessions are cookies.
+      FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL}
+
+      # Across subdomains of one domain use COOKIE_DOMAIN=.example.com with lax.
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET}
+
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      CUSTOMER_EMAIL: ${CUSTOMER_EMAIL:-customer@example.com}
+      CUSTOMER_PASSWORD: ${CUSTOMER_PASSWORD:-change-me}
+
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-razorpay}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-console}
+      EMAIL_FROM: ${EMAIL_FROM:-orders@example.com}
+
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
+      # Baked into image URLs as rows are written — get it right before uploading.
+      STORAGE_PUBLIC_URL: ${STORAGE_PUBLIC_URL:?set STORAGE_PUBLIC_URL}
+    ports:
+      - '${BACKEND_PORT:-4000}:4000'
+    volumes:
+      # Uploads must outlive the container when STORAGE_PROVIDER=local.
+      - api-uploads:/app/uploads
+
+  # Optional. The app runs without it. Enable with `--profile cache`.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ['cache']
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  api-uploads:
+  redis-data:

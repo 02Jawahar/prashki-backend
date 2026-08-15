@@ -1,0 +1,585 @@
+// Commerce schema.
+//
+// Two conventions hold throughout:
+//
+//   MONEY is integer paise. ₹15,000.00 is stored as 1500000. Never Float or
+//   Decimal-as-float — a rounding drift inside an order total is a support
+//   problem, not a rounding problem.
+//
+//   SNAPSHOTS. Anything historical (order lines, addresses on an order) copies
+//   the values it needs at the time it is written. Reconstructing a two-year-old
+//   order must never depend on the current product record.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+/// Coarse account type. Drives the storefront/admin split and route guards.
+/// Fine-grained capability lives in Role -> Permission below; this exists so
+/// the common check ("is this an admin at all?") is one indexed column.
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+/// One users table for customers and staff alike (spec §4) — no second
+/// authentication system. Separation of powers is enforced by role and
+/// permission checks on every admin endpoint, never by which table you are in.
+model User {
+  id            String     @id @default(cuid())
+  name          String
+  email         String     @unique
+  phone         String?
+  passwordHash  String
+  role          UserRole   @default(CUSTOMER)
+  status        UserStatus @default(ACTIVE)
+  emailVerified Boolean    @default(false)
+  lastLoginAt   DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  roles         UserRoleAssignment[]
+  addresses     Address[]
+  cart          Cart?
+  orders        Order[]
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+  statusChanges OrderStatusHistory[]
+
+  @@index([role, status])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model Role {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  name        String
+  description String?
+  /// Seeded roles cannot be deleted through the admin UI.
+  isSystem    Boolean @default(false)
+
+  permissions RolePermission[]
+  users       UserRoleAssignment[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id    String @id @default(cuid())
+  key   String @unique
+  group String
+  label String
+
+  roles RolePermission[]
+
+  @@index([group])
+  @@map("permissions")
+}
+
+model UserRoleAssignment {
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+/// Refresh tokens are stored hashed — a database leak must not yield usable
+/// sessions. `family` ties a rotation chain together so reuse of an already
+/// rotated token can revoke the whole lineage.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  family    String
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ip        String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([family])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+enum CategoryStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// `parentId` is present from day one so categories can become hierarchical
+/// without a migration, even though the first admin UI is single-level.
+model Category {
+  id          String         @id @default(cuid())
+  name        String
+  slug        String         @unique
+  description String?
+  image       String?
+  status      CategoryStatus @default(ACTIVE)
+  sortOrder   Int            @default(0)
+  parentId    String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@index([status, sortOrder])
+  @@index([parentId])
+  @@map("categories")
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model Product {
+  id               String        @id @default(cuid())
+  name             String
+  slug             String        @unique
+  description      String
+  shortDescription String?
+  sku              String        @unique
+  /// paise
+  price            Int
+  /// paise; the "was" price. Discount % is always derived, never stored.
+  compareAtPrice   Int?
+  status           ProductStatus @default(DRAFT)
+  featured         Boolean       @default(false)
+  categoryId       String?
+  publishedAt      DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  category Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  variants ProductVariant[]
+  images   ProductImage[]
+
+  @@index([status])
+  @@index([categoryId])
+  @@index([status, featured])
+  @@index([status, publishedAt])
+  @@map("products")
+}
+
+enum VariantStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// Every product has at least one variant, including single-SKU products (a
+/// "Default" variant). That keeps cart lines, order lines and inventory keyed
+/// off one thing instead of branching on whether variants exist.
+model ProductVariant {
+  id        String        @id @default(cuid())
+  productId String
+  name      String
+  sku       String        @unique
+  /// paise; null means inherit Product.price
+  price     Int?
+  status    VariantStatus @default(ACTIVE)
+  position  Int           @default(0)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  product    Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  inventory  Inventory?
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([productId])
+  @@index([status])
+  @@map("product_variants")
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  url       String
+  altText   String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, sortOrder])
+  @@map("product_images")
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+
+enum InventoryMovementType {
+  INITIAL_STOCK
+  PURCHASE
+  SALE
+  RETURN
+  ADJUSTMENT
+  DAMAGE
+}
+
+/// Stock lives here, not as a loose number on the product (spec §14).
+/// Every change to `availableStock` is written together with a movement row in
+/// the same transaction, so the ledger always explains the balance.
+model Inventory {
+  id                String   @id @default(cuid())
+  variantId         String   @unique
+  availableStock    Int      @default(0)
+  reservedStock     Int      @default(0)
+  lowStockThreshold Int      @default(5)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  variant   ProductVariant      @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  movements InventoryMovement[]
+
+  @@index([availableStock])
+  @@map("inventory")
+}
+
+model InventoryMovement {
+  id          String                @id @default(cuid())
+  inventoryId String
+  type        InventoryMovementType
+  /// Signed: negative for SALE and DAMAGE, positive for restocks.
+  quantity    Int
+  /// Stock level after applying this movement — makes the ledger auditable
+  /// without replaying the whole history.
+  balanceAfter Int
+  reason      String?
+  /// Loose link to whatever caused it, e.g. ("ORDER", orderId).
+  referenceType String?
+  referenceId   String?
+  createdById   String?
+  createdAt     DateTime            @default(now())
+
+  inventory Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+
+  @@index([inventoryId, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("inventory_movements")
+}
+
+// ---------------------------------------------------------------------------
+// Addresses
+// ---------------------------------------------------------------------------
+
+model Address {
+  id           String   @id @default(cuid())
+  userId       String
+  label        String?
+  name         String
+  phone        String
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String
+  postalCode   String
+  country      String   @default("IN")
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("addresses")
+}
+
+// ---------------------------------------------------------------------------
+// Cart
+// ---------------------------------------------------------------------------
+
+/// A cart is either a guest cart (token only) or a user cart (userId set).
+/// On login the guest cart is merged into the user's cart and then discarded.
+model Cart {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+
+  @@index([updatedAt])
+  @@map("carts")
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  cartId    String
+  variantId String
+  quantity  Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
+  @@index([cartId])
+  @@map("cart_items")
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  orderNumber String      @unique
+  userId      String
+  status      OrderStatus @default(PENDING_PAYMENT)
+
+  /// all paise
+  subtotal Int
+  discount Int    @default(0)
+  shipping Int    @default(0)
+  tax      Int    @default(0)
+  total    Int
+  currency String @default("INR")
+
+  /// Frozen copies — the address rows may later be edited or deleted.
+  shippingAddressSnapshot Json
+  billingAddressSnapshot  Json?
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User                 @relation(fields: [userId], references: [id])
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
+  payments      Payment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  productId String?
+  variantId String?
+
+  /// Snapshots (spec §26) — never join back to the product to render history.
+  productNameSnapshot String
+  variantNameSnapshot String?
+  sku                 String
+  imageUrlSnapshot    String?
+  unitPrice           Int
+  quantity            Int
+  lineTotal           Int
+
+  order   Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id          String       @id @default(cuid())
+  orderId     String
+  fromStatus  OrderStatus?
+  toStatus    OrderStatus
+  note        String?
+  changedById String?
+  createdAt   DateTime     @default(now())
+
+  order     Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  changedBy User? @relation(fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// Payments
+// ---------------------------------------------------------------------------
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+/// An order may accumulate several payment attempts; the order is only PAID
+/// once one of them reaches CAPTURED via verified signature or webhook.
+///
+/// Card numbers, CVVs, UPI credentials and the like are never stored — only
+/// provider references.
+model Payment {
+  id                String        @id @default(cuid())
+  orderId           String
+  provider          String
+  providerOrderId   String?
+  providerPaymentId String?
+  amount            Int
+  currency          String        @default("INR")
+  status            PaymentStatus @default(CREATED)
+  failureReason     String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  order        Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  transactions PaymentTransaction[]
+
+  @@index([orderId])
+  @@index([providerPaymentId])
+  @@index([providerOrderId])
+  @@map("payments")
+}
+
+enum PaymentTransactionType {
+  CREATE
+  AUTHORIZE
+  CAPTURE
+  FAIL
+  REFUND
+  WEBHOOK
+}
+
+model PaymentTransaction {
+  id                String                 @id @default(cuid())
+  paymentId         String
+  type              PaymentTransactionType
+  status            PaymentStatus
+  amount            Int?
+  providerReference String?
+  /// Provider response, minus anything sensitive.
+  payload           Json?
+  createdAt         DateTime               @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId, createdAt])
+  @@map("payment_transactions")
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  SKIPPED
+}
+
+/// Idempotency ledger for provider webhooks (spec §32). The unique constraint
+/// on (provider, eventId) is what makes redelivery a no-op.
+model WebhookEvent {
+  id          String        @id @default(cuid())
+  provider    String
+  eventId     String
+  eventType   String
+  status      WebhookStatus @default(RECEIVED)
+  payload     Json
+  error       String?
+  receivedAt  DateTime      @default(now())
+  processedAt DateTime?
+
+  @@unique([provider, eventId])
+  @@index([provider, eventType])
+  @@index([status])
+  @@map("webhook_events")
+}
+
+// ---------------------------------------------------------------------------
+// Settings, audit
+// ---------------------------------------------------------------------------
+
+enum SettingType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+}
+
+/// Store configuration, so nothing business-related is hard-coded in the
+/// frontend (spec §37). Values are stored as text and cast by `type`.
+model Setting {
+  id        String      @id @default(cuid())
+  key       String      @unique
+  value     String
+  type      SettingType @default(STRING)
+  group     String      @default("general")
+  label     String
+  updatedAt DateTime    @updatedAt
+
+  @@index([group])
+  @@map("settings")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String
+  /// Never store secrets here.
+  metadata   Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
