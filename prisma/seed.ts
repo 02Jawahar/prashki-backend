@@ -199,6 +199,7 @@ async function wipe() {
   await prisma.orderStatusHistory.deleteMany()
   await prisma.orderItem.deleteMany()
   await prisma.order.deleteMany()
+  await prisma.shippingRate.deleteMany()
   await prisma.shippingMethod.deleteMany()
   await prisma.shippingZone.deleteMany()
   await prisma.pageRevision.deleteMany()
@@ -368,6 +369,15 @@ async function seedProducts(categoryIds: Map<string, string>, adminId: string) {
           name,
           sku,
           price: null, // inherit the product price
+          /**
+           * Shipping weight, so the rate bands have something real to work
+           * with. A saree is heavier than a scarf, and the deterministic
+           * seed keeps the numbers stable across re-runs.
+           */
+          weightGrams:
+            p.optionSet === 'onesize'
+              ? seededInt(`${sku}-w`, 120, 400)
+              : seededInt(`${sku}-w`, 450, 1_400),
           status: 'ACTIVE',
           position: vi,
         },
@@ -546,18 +556,77 @@ async function seedAttributes() {
 }
 
 /**
- * One India-wide zone plus a metro zone that ships faster. The default flag on
- * the national zone is what keeps an unusual address deliverable.
+ * Shipping configuration (M21).
+ *
+ * Three zones, matched in `position` order:
+ *
+ *   0  Not serviceable — a PIN blocklist that refuses before anything else
+ *      gets a chance to offer delivery
+ *   1  Metro cities   — cheaper and faster, matched by state or PIN prefix
+ *   2  India          — the default, which is what keeps an unusual address
+ *                       deliverable rather than stranded
+ *
+ * Standard delivery carries weight bands, so a heavy parcel costs more than a
+ * scarf. Express is a flat rate with a carrier weight ceiling.
  */
 async function seedShipping() {
+  // Andaman & Nicobar and Lakshadweep — genuinely hard to reach by surface
+  // courier, and a working example of how a refusal is expressed.
   await prisma.shippingZone.create({
+    data: {
+      name: 'Not currently serviced',
+      countries: ['IN'],
+      regions: ['744', '682555', 'Andaman and Nicobar Islands', 'Lakshadweep'],
+      isServiceable: false,
+      unserviceableMessage:
+        'We are not able to deliver to that PIN code yet. Write to us and we will try to arrange something.',
+      isActive: true,
+      position: 0,
+    },
+  })
+
+  const metro = await prisma.shippingZone.create({
+    data: {
+      name: 'Metro cities',
+      countries: ['IN'],
+      // Matched by state name or PIN prefix — see resolveZone.
+      regions: ['Delhi', 'Maharashtra', 'Karnataka', 'Telangana', 'Tamil Nadu'],
+      isActive: true,
+      position: 1,
+      methods: {
+        create: [
+          {
+            name: 'Standard delivery',
+            description: 'Delivered by our courier partners.',
+            rate: 9_000,
+            freeAbove: 300_000,
+            minDays: 2,
+            maxDays: 4,
+            position: 0,
+          },
+          {
+            name: 'Next-day delivery',
+            description: 'Order before 2pm for delivery tomorrow.',
+            rate: 29_000,
+            maxWeightGrams: 5_000,
+            minDays: 1,
+            maxDays: 1,
+            position: 1,
+          },
+        ],
+      },
+    },
+    include: { methods: true },
+  })
+
+  const india = await prisma.shippingZone.create({
     data: {
       name: 'India',
       countries: ['IN'],
       regions: [],
       isDefault: true,
       isActive: true,
-      position: 1,
+      position: 2,
       methods: {
         create: [
           {
@@ -573,6 +642,7 @@ async function seedShipping() {
             name: 'Express delivery',
             description: 'Priority despatch, tracked end to end.',
             rate: 35_000,
+            maxWeightGrams: 10_000,
             minDays: 2,
             maxDays: 3,
             position: 1,
@@ -591,39 +661,42 @@ async function seedShipping() {
         ],
       },
     },
+    include: { methods: true },
   })
 
-  await prisma.shippingZone.create({
-    data: {
-      name: 'Metro cities',
-      countries: ['IN'],
-      // Matched by state name or PIN prefix — see resolveZone.
-      regions: ['Delhi', 'Maharashtra', 'Karnataka', 'Telangana', 'Tamil Nadu'],
-      isActive: true,
-      position: 0,
-      methods: {
-        create: [
-          {
-            name: 'Standard delivery',
-            description: 'Delivered by our courier partners.',
-            rate: 9_000,
-            freeAbove: 300_000,
-            minDays: 2,
-            maxDays: 4,
-            position: 0,
-          },
-          {
-            name: 'Next-day delivery',
-            description: 'Order before 2pm for delivery tomorrow.',
-            rate: 29_000,
-            minDays: 1,
-            maxDays: 1,
-            position: 1,
-          },
-        ],
-      },
+  /**
+   * Weight bands on standard delivery in both zones. Bounds are
+   * inclusive-lower, exclusive-upper, so 500 g falls in the second band.
+   */
+  const bands = (methodId: string, base: number) => [
+    { methodId, label: 'Up to 500 g', maxWeightGrams: 500, amount: base, position: 0 },
+    {
+      methodId,
+      label: '500 g – 2 kg',
+      minWeightGrams: 500,
+      maxWeightGrams: 2_000,
+      amount: base + 4_000,
+      position: 1,
     },
+    {
+      methodId,
+      label: '2 kg – 5 kg',
+      minWeightGrams: 2_000,
+      maxWeightGrams: 5_000,
+      amount: base + 10_000,
+      position: 2,
+    },
+    { methodId, label: 'Over 5 kg', minWeightGrams: 5_000, amount: base + 20_000, position: 3 },
+  ]
+
+  const metroStandard = metro.methods.find((m) => m.name === 'Standard delivery')!
+  const indiaStandard = india.methods.find((m) => m.name === 'Standard delivery')!
+
+  await prisma.shippingRate.createMany({
+    data: [...bands(metroStandard.id, 9_000), ...bands(indiaStandard.id, 15_000)],
   })
+
+  return { zones: 3, methods: metro.methods.length + india.methods.length, bands: 8 }
 }
 
 /** Policy pages the footer and checkout link to. Marked system so they stay. */
@@ -938,8 +1011,10 @@ async function main() {
   const attributeLinks = await seedAttributes()
   console.log(`  2 attributes, ${attributeLinks} variant options`)
 
-  await seedShipping()
-  console.log('  2 shipping zones, 5 delivery methods')
+  const shipping = await seedShipping()
+  console.log(
+    `  ${shipping.zones} shipping zones (1 non-serviceable), ${shipping.methods} methods, ${shipping.bands} rate bands`,
+  )
 
   const pages = await seedPages()
   console.log(`  ${pages} content pages`)

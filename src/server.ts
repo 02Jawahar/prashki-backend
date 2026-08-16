@@ -4,6 +4,7 @@ import { logger } from './config/logger.js'
 import { prisma, setDatabaseUrl } from './config/db.js'
 import { ensureDatabase, waitForDatabase } from './config/embedded-db.js'
 import { registerEventHandlers } from './events/handlers.js'
+import { assertShippingConfigured } from './integrations/shipping/index.js'
 
 // In development the API owns the database lifecycle, so `npm run dev` is the
 // only command needed. In production DATABASE_URL is used as-is.
@@ -15,6 +16,16 @@ setDatabaseUrl(db.url)
 // Refuse to serve traffic we cannot fulfil.
 try {
   await waitForDatabase(() => prisma.$queryRaw`SELECT 1`)
+} catch (err) {
+  logger.fatal(err instanceof Error ? err.message : String(err))
+  process.exit(1)
+}
+
+// A carrier named in the environment but not registered is a configuration
+// error, and it should surface at boot rather than when the first parcel is
+// packed.
+try {
+  assertShippingConfigured()
 } catch (err) {
   logger.fatal(err instanceof Error ? err.message : String(err))
   process.exit(1)

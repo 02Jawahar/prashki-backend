@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import type { OrderStatus } from '@prisma/client'
 import { prisma } from '../../config/db.js'
+import { env } from '../../config/env.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { percentOf } from '../../utils/money.js'
 import { emit } from '../../events/bus.js'
@@ -157,9 +158,22 @@ export async function createOrder(input: CreateOrderInput) {
       const shippingWaived = evaluation?.freeShipping ?? false
 
       /**
+       * Parcel weight decides which rate band applies, so it is computed from
+       * the same cart lines the order is being built from rather than read
+       * back afterwards.
+       */
+      const weightGrams = cart.items.reduce(
+        (total, item) =>
+          total +
+          (item.variant.weightGrams ?? env.SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS) * item.quantity,
+        0,
+      )
+
+      /**
        * A configured method wins; the settings flat rate is the fallback for a
        * store with no zones set up yet. Either way the amount is computed here,
-       * server-side, from the address the order is actually going to.
+       * server-side, from the address the order is actually going to — and it
+       * throws rather than falling back if the address is not serviceable.
        */
       const quote = input.shippingMethodId
         ? await priceChosenMethod(input.shippingMethodId, {
@@ -167,6 +181,7 @@ export async function createOrder(input: CreateOrderInput) {
             state: address.state,
             postalCode: address.postalCode,
             subtotal: subtotal - discount,
+            weightGrams,
             freeShippingCoupon: shippingWaived,
           })
         : null

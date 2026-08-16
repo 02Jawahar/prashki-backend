@@ -841,6 +841,20 @@ model ShippingZone {
   regions   String[]
   isDefault Boolean  @default(false)
   isActive  Boolean  @default(true)
+
+  /**
+   * Serviceability (FR-21.1).
+   *
+   * When false, an address matching this zone is explicitly NOT deliverable —
+   * the zone exists to say no. Because zones are matched in `position` order,
+   * a narrow non-serviceable zone at position 0 beats the broad default zone
+   * behind it, which is how a PIN blocklist is expressed without a second
+   * matching mechanism.
+   */
+  isServiceable Boolean @default(true)
+  /// Shown to the customer when this zone refuses delivery.
+  unserviceableMessage String?
+
   position  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -867,20 +881,66 @@ model ShippingMethod {
   /// Shown to the customer as "3–5 business days".
   minDays     Int?
   maxDays     Int?
+  /// Parcel weight this method cannot carry, in grams. Null = no limit.
+  /// A basket heavier than this is not offered the method at all (FR-21.2).
+  maxWeightGrams Int?
+
   /// Cash on delivery is a shipping method with an extra fee attached.
   isCod       Boolean @default(false)
   codFee      Int     @default(0)
+
+  /**
+   * Which adapter creates shipments for this method. Null means the parcel is
+   * booked by hand and an operator enters the tracking number — which is a
+   * legitimate configuration, not a missing one.
+   */
+  provider String?
 
   isActive  Boolean  @default(true)
   position  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  zone   ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  zone   ShippingZone   @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  rates  ShippingRate[]
   orders Order[]
 
   @@index([zoneId, isActive, position])
   @@map("shipping_methods")
+}
+
+/**
+ * A rate band (FR-21.2).
+ *
+ * `ShippingMethod.rate` is the flat fallback. When a method has bands, the
+ * first band matching the parcel's weight and the basket's value wins, which
+ * is how "under 500g costs ₹60, up to 2kg costs ₹120" is expressed.
+ *
+ * Bounds are inclusive-lower, exclusive-upper, so adjacent bands can share an
+ * edge without overlapping. Null means unbounded on that side.
+ */
+model ShippingRate {
+  id       String @id @default(cuid())
+  methodId String
+  /// Human label for the admin table, e.g. "Up to 500 g".
+  label    String?
+
+  minWeightGrams Int?
+  maxWeightGrams Int?
+  minSubtotal    Int?
+  maxSubtotal    Int?
+
+  /// Charge for this band, in paise.
+  amount   Int
+  position Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  method ShippingMethod @relation(fields: [methodId], references: [id], onDelete: Cascade)
+
+  @@index([methodId, position])
+  @@map("shipping_rates")
 }
 
 // ============================================================================
@@ -896,6 +956,10 @@ enum ShipmentStatus {
   IN_TRANSIT
   OUT_FOR_DELIVERY
   DELIVERED
+  /// Carrier reported a problem the parcel can still recover from — a wrong
+  /// address, nobody home, weather. Distinct from FAILED, which is the end of
+  /// the attempt (FR-21.6).
+  EXCEPTION
   FAILED
   RETURNED_TO_ORIGIN
   CANCELLED
@@ -913,12 +977,41 @@ model Shipment {
   /// Full URL the customer can open, built from the carrier's template.
   trackingUrl    String?
 
-  /// Grams. Used for carrier manifests.
+  /**
+   * Package profile (FR-21.4). One shipment is one parcel in this model — a
+   * consignment that needs two boxes is two shipments, which is also how the
+   * carrier will bill and track it.
+   */
   weightGrams Int?
+  lengthMm    Int?
+  widthMm     Int?
+  heightMm    Int?
+
+  /**
+   * Provider references (FR-21.3, FR-21.4). All null for a parcel booked by
+   * hand. `providerShipmentId` is unique so a carrier callback can find the
+   * shipment without trusting anything else in the payload.
+   */
+  provider           String?
+  providerShipmentId String? @unique
+  labelUrl           String?
+
+  /// Dispatch data — who handed it over and when it was packed.
+  dispatchedBy String?
+  packedAt     DateTime?
 
   shippedAt   DateTime?
   deliveredAt DateTime?
   estimatedAt DateTime?
+
+  /**
+   * Set when a carrier event arrived that would have moved this shipment
+   * backwards. The event is still recorded, but the status is left alone and
+   * an operator is asked to look (M09: out-of-order events cannot move a
+   * delivered shipment backwards without review).
+   */
+  needsReview   Boolean @default(false)
+  reviewReason  String?
 
   notes     String?
   createdAt DateTime @default(now())
@@ -952,11 +1045,29 @@ model ShipmentItem {
 model ShipmentEvent {
   id         String         @id @default(cuid())
   shipmentId String
+  /// Our canonical status, mapped from whatever the carrier called it.
   status     ShipmentStatus
   message    String?
   location   String?
-  occurredAt DateTime       @default(now())
-  createdAt  DateTime       @default(now())
+
+  /**
+   * Carrier event provenance (FR-21.5).
+   *
+   * `providerEventId` is unique, so a redelivered callback collides on insert
+   * and becomes a no-op — the same mechanism the payment webhook uses.
+   * `providerStatus` keeps the carrier's own wording, because a mapping that
+   * turns out to be wrong is only debuggable if the original survived.
+   */
+  providerEventId String? @unique
+  providerStatus  String?
+  /// "manual" | "provider" | "system"
+  source          String  @default("manual")
+  /// True when this event was recorded but deliberately did not move the
+  /// shipment, because it arrived out of order.
+  ignoredForStatus Boolean @default(false)
+
+  occurredAt DateTime @default(now())
+  createdAt  DateTime @default(now())
 
   shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
 

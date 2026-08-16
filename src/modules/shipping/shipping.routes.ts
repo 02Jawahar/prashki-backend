@@ -9,7 +9,11 @@ import { NotFoundError } from '../../utils/errors.js'
 import { recordAudit } from '../../utils/audit.js'
 import { loadCart, serializeCart } from '../cart/cart.serializer.js'
 import { resolveCart } from '../cart/cart.service.js'
-import { quoteShipping } from './shipping.service.js'
+import {
+  getShippingProvider,
+  type ServiceabilityResult,
+} from '../../integrations/shipping/index.js'
+import { cartWeightGrams, quoteShipping, resolveZone } from './shipping.service.js'
 
 /**
  * Delivery options for the current bag (M21).
@@ -39,15 +43,82 @@ shippingRouter.get('/quote', validate({ query: quoteQuery }), async (req, res) =
     state: q.state,
     postalCode: q.postalCode,
     subtotal: serialized.discountedSubtotal,
+    weightGrams: await cartWeightGrams(cart.id),
     freeShippingCoupon: serialized.freeShipping,
   })
 
   return ok(res, {
     ...quote,
-    /** Empty methods with a resolved zone still means "we cannot deliver". */
-    deliverable: quote.methods.length > 0,
+    /** Kept for existing clients; `serviceable` is the field to read. */
+    deliverable: quote.serviceable,
   })
 })
+
+const serviceabilityQuery = z.object({
+  postalCode: z.string().trim().min(3).max(20),
+  country: z.string().trim().length(2).default('IN'),
+})
+
+/**
+ * "Do you deliver to my PIN?" (FR-21.1).
+ *
+ * Public and cart-independent, so the product page can answer before anything
+ * is in the bag. It reports the zone's own rules; the carrier adapter is asked
+ * too, when it has an opinion.
+ */
+shippingRouter.get(
+  '/serviceability',
+  validate({ query: serviceabilityQuery }),
+  async (req, res) => {
+    const q = req.validated!.query as z.infer<typeof serviceabilityQuery>
+
+    const zone = await resolveZone({ country: q.country, postalCode: q.postalCode })
+
+    if (!zone || !zone.isServiceable) {
+      return ok(res, {
+        serviceable: false,
+        codAvailable: false,
+        zone: zone ? { id: zone.id, name: zone.name } : null,
+        reason:
+          zone?.unserviceableMessage ??
+          'We are not able to deliver to that PIN code at the moment.',
+        estimate: null,
+      })
+    }
+
+    const provider = getShippingProvider()
+    const carrier: ServiceabilityResult = await provider
+      .checkServiceability(q.postalCode, { country: q.country })
+      // A carrier lookup that fails must not make a serviceable PIN look dead —
+      // the zone configuration is the fallback answer, not an error.
+      .catch(() => ({ serviceable: true, codAvailable: true }))
+
+    if (!carrier.serviceable) {
+      return ok(res, {
+        serviceable: false,
+        codAvailable: false,
+        zone: { id: zone.id, name: zone.name },
+        reason: carrier.reason ?? 'Our courier does not currently reach that PIN code.',
+        estimate: null,
+      })
+    }
+
+    const days = zone.methods
+      .map((m) => ({ min: m.minDays, max: m.maxDays }))
+      .filter((d): d is { min: number; max: number } => d.min !== null && d.max !== null)
+
+    return ok(res, {
+      serviceable: zone.methods.length > 0,
+      codAvailable: carrier.codAvailable && zone.methods.some((m) => m.isCod),
+      zone: { id: zone.id, name: zone.name },
+      reason: zone.methods.length > 0 ? null : 'No delivery option covers that PIN code yet.',
+      estimate:
+        days.length > 0
+          ? { minDays: Math.min(...days.map((d) => d.min)), maxDays: Math.max(...days.map((d) => d.max)) }
+          : null,
+    })
+  },
+)
 
 // ------------------------------------------------------------------- admin
 
@@ -59,8 +130,38 @@ const zoneSchema = z.object({
   regions: z.array(z.string().trim().min(1).max(100)).max(200).default([]),
   isDefault: z.boolean().default(false),
   isActive: z.boolean().default(true),
+  /// False turns the zone into a refusal — see the service for why.
+  isServiceable: z.boolean().default(true),
+  unserviceableMessage: z.string().trim().max(300).optional().nullable(),
   position: z.coerce.number().int().min(0).default(0),
 })
+
+const rateSchema = z
+  .object({
+    label: z.string().trim().max(80).optional().nullable(),
+    minWeightGrams: z.coerce.number().int().min(0).nullable().optional(),
+    maxWeightGrams: z.coerce.number().int().min(1).nullable().optional(),
+    minSubtotal: z.coerce.number().int().min(0).nullable().optional(),
+    maxSubtotal: z.coerce.number().int().min(1).nullable().optional(),
+    amount: z.coerce.number().int().min(0),
+    position: z.coerce.number().int().min(0).default(0),
+  })
+  .superRefine((v, ctx) => {
+    if (v.minWeightGrams != null && v.maxWeightGrams != null && v.maxWeightGrams <= v.minWeightGrams) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['maxWeightGrams'],
+        message: 'The upper weight must be above the lower weight',
+      })
+    }
+    if (v.minSubtotal != null && v.maxSubtotal != null && v.maxSubtotal <= v.minSubtotal) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['maxSubtotal'],
+        message: 'The upper value must be above the lower value',
+      })
+    }
+  })
 
 const methodFields = z.object({
   name: z.string().trim().min(2).max(120),
@@ -69,10 +170,14 @@ const methodFields = z.object({
   freeAbove: z.coerce.number().int().min(0).nullable().optional(),
   minSubtotal: z.coerce.number().int().min(0).nullable().optional(),
   maxSubtotal: z.coerce.number().int().min(0).nullable().optional(),
+  /// Parcels above this are not offered the method (carrier limit).
+  maxWeightGrams: z.coerce.number().int().min(1).nullable().optional(),
   minDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
   maxDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
   isCod: z.boolean().default(false),
   codFee: z.coerce.number().int().min(0).default(0),
+  /// Null books by hand; a name selects a registered carrier adapter.
+  provider: z.string().trim().max(60).optional().nullable(),
   isActive: z.boolean().default(true),
   position: z.coerce.number().int().min(0).default(0),
 })
@@ -104,10 +209,71 @@ const methodPatchSchema = methodFields.partial().superRefine(checkRanges)
 adminShippingRouter.get('/zones', requirePermission('settings.read'), async (_req, res) => {
   const zones = await prisma.shippingZone.findMany({
     orderBy: [{ position: 'asc' }, { name: 'asc' }],
-    include: { methods: { orderBy: [{ position: 'asc' }, { rate: 'asc' }] } },
+    include: {
+      methods: {
+        orderBy: [{ position: 'asc' }, { rate: 'asc' }],
+        include: { rates: { orderBy: { position: 'asc' } } },
+      },
+    },
   })
-  return ok(res, { zones })
+
+  const provider = getShippingProvider()
+
+  return ok(res, {
+    zones,
+    /** So the admin screen can say whether parcels are booked by hand. */
+    provider: { name: provider.name, canCreateShipments: provider.canCreateShipments },
+  })
 })
+
+/**
+ * Rate bands for a method (FR-21.2). Replaced wholesale — the editor always
+ * sends the complete set, so a removed band is a removed row.
+ */
+adminShippingRouter.put(
+  '/methods/:id/rates',
+  writeLimiter,
+  requirePermission('shipping.manage'),
+  validate({ body: z.object({ rates: z.array(rateSchema).max(30) }) }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const { rates } = req.validated!.body as { rates: Array<z.infer<typeof rateSchema>> }
+
+    const method = await prisma.shippingMethod.findUnique({ where: { id } })
+    if (!method) throw new NotFoundError('Shipping method', 'SHIPPING_METHOD_NOT_FOUND')
+
+    await prisma.$transaction([
+      prisma.shippingRate.deleteMany({ where: { methodId: id } }),
+      prisma.shippingRate.createMany({
+        data: rates.map((rate, index) => ({
+          methodId: id,
+          label: rate.label ?? null,
+          minWeightGrams: rate.minWeightGrams ?? null,
+          maxWeightGrams: rate.maxWeightGrams ?? null,
+          minSubtotal: rate.minSubtotal ?? null,
+          maxSubtotal: rate.maxSubtotal ?? null,
+          amount: rate.amount,
+          position: rate.position || index,
+        })),
+      }),
+    ])
+
+    recordAudit({
+      action: 'SHIPPING_RATES_UPDATED',
+      entityType: 'ShippingMethod',
+      entityId: id,
+      metadata: { bands: rates.length },
+      req,
+    })
+
+    return ok(res, {
+      method: await prisma.shippingMethod.findUnique({
+        where: { id },
+        include: { rates: { orderBy: { position: 'asc' } } },
+      }),
+    })
+  },
+)
 
 /** Exactly one zone may be the fallback, so setting one clears the rest. */
 async function clearOtherDefaults(exceptId?: string) {

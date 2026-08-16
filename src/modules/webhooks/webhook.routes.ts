@@ -3,7 +3,10 @@ import type { Prisma } from '@prisma/client'
 import { prisma } from '../../config/db.js'
 import { logger } from '../../config/logger.js'
 import { getPaymentProvider } from '../../integrations/payment/index.js'
+import { getShippingProvider, type CarrierEvent } from '../../integrations/shipping/index.js'
 import { announcePaid, markOrderPaid, markPaymentFailed } from '../payments/payment.service.js'
+import { applyCarrierEvent } from '../shipments/shipment.service.js'
+import { AppError } from '../../utils/errors.js'
 
 /**
  * Provider webhooks (spec §32).
@@ -150,6 +153,111 @@ async function processEvent(
         userId: outcome.order.userId,
         total: outcome.order.total,
       })
+    }
+
+    await finish('PROCESSED')
+  } catch (err) {
+    await finish('FAILED', err instanceof Error ? err.message : String(err)).catch(() => undefined)
+    throw err
+  }
+}
+
+// ------------------------------------------------------------------ carrier
+
+/**
+ * Carrier status callbacks (FR-21.5).
+ *
+ * Same four rules as the payment webhook, for the same reasons: the signature
+ * is the authentication, the raw bytes are what gets verified, `(provider,
+ * eventId)` makes redelivery a no-op, and we acknowledge before doing the work
+ * so the carrier does not retry on our latency.
+ *
+ * The one addition is ordering. Couriers deliver events late and out of
+ * sequence routinely; `applyCarrierEvent` records those but refuses to walk a
+ * delivered parcel backwards, flagging it for review instead.
+ */
+webhookRouter.post('/shipping', async (req, res) => {
+  const provider = getShippingProvider()
+
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body ?? {}))
+  const signature =
+    (req.get('x-shipping-signature') as string | undefined) ??
+    (req.get('x-webhook-signature') as string | undefined)
+
+  let event: CarrierEvent | null
+  try {
+    event = provider.parseWebhook(rawBody, signature)
+  } catch (err) {
+    logger.error({ err }, 'Carrier webhook parsing failed')
+    /**
+     * The specific code is passed through rather than flattened into one
+     * generic failure. "We are not configured", "that status is not in the
+     * mapping" and "that body is not JSON" need different responses from
+     * whoever is looking, and collapsing them hides a misconfiguration behind
+     * what looks like a bad request.
+     */
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: err instanceof AppError ? err.code : 'WEBHOOK_INVALID',
+        message: err instanceof Error ? err.message : 'Could not process the callback',
+      },
+    })
+  }
+
+  if (!event) {
+    logger.warn('Rejected a carrier webhook with an invalid signature')
+    return res.status(400).json({
+      success: false,
+      error: { code: 'WEBHOOK_SIGNATURE_INVALID', message: 'Invalid signature' },
+    })
+  }
+
+  // ---- idempotency gate ----
+  try {
+    await prisma.webhookEvent.create({
+      data: {
+        provider: `shipping:${provider.name}`,
+        eventId: event.eventId,
+        eventType: event.providerStatus,
+        status: 'RECEIVED',
+        payload: event.payload as Prisma.InputJsonValue,
+      },
+    })
+  } catch (err) {
+    if ((err as { code?: string }).code === 'P2002') {
+      logger.info({ eventId: event.eventId }, 'Duplicate carrier webhook ignored')
+      return res.status(200).json({ success: true, data: { received: true, duplicate: true } })
+    }
+    throw err
+  }
+
+  res.status(200).json({ success: true, data: { received: true } })
+
+  void processCarrierEvent(event, `shipping:${provider.name}`).catch((err) =>
+    logger.error({ err, eventId: event.eventId }, 'Carrier webhook processing failed'),
+  )
+})
+
+async function processCarrierEvent(event: CarrierEvent, providerKey: string) {
+  const finish = async (status: 'PROCESSED' | 'FAILED' | 'SKIPPED', error?: string) => {
+    await prisma.webhookEvent.update({
+      where: { provider_eventId: { provider: providerKey, eventId: event.eventId } },
+      data: { status, error: error ?? null, processedAt: new Date() },
+    })
+  }
+
+  try {
+    const result = await applyCarrierEvent(event)
+
+    if (!result) {
+      // An event for a parcel we do not know about is not a failure on our
+      // side — it is recorded so it can be reconciled by hand.
+      await finish(
+        'SKIPPED',
+        `No shipment matched ${event.providerShipmentId ?? event.trackingNumber ?? 'the event'}`,
+      )
+      return
     }
 
     await finish('PROCESSED')

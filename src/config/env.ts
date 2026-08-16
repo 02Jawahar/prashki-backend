@@ -56,6 +56,15 @@ const schema = z.object({
   SMS_PROVIDER: z.enum(['noop', 'msg91', 'twilio']).default('noop'),
   WHATSAPP_PROVIDER: z.enum(['noop', 'meta', 'twilio']).default('noop'),
 
+  /**
+   * Carrier integration. `manual` means parcels are booked by hand — the
+   * inbound status webhook still works, verified with the shared secret below.
+   */
+  SHIPPING_PROVIDER: z.string().default('manual'),
+  SHIPPING_WEBHOOK_SECRET: z.string().optional(),
+  /// Fallback parcel weight per unit when a variant has none, in grams.
+  SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS: z.coerce.number().int().min(0).default(500),
+
   REDIS_URL: z.string().optional(),
 
   STORAGE_PROVIDER: z.enum(['local', 's3', 'r2']).default('local'),

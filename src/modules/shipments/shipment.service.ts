@@ -3,6 +3,8 @@ import { prisma } from '../../config/db.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { emit } from '../../events/bus.js'
 import { recordAudit } from '../../utils/audit.js'
+import { getShippingProvider, type CarrierEvent } from '../../integrations/shipping/index.js'
+import { orderWeightGrams } from '../shipping/shipping.service.js'
 
 /**
  * Fulfilment (M09).
@@ -47,8 +49,17 @@ export interface CreateShipmentInput {
   carrier?: string | null
   trackingNumber?: string | null
   weightGrams?: number | null
+  lengthMm?: number | null
+  widthMm?: number | null
+  heightMm?: number | null
   estimatedAt?: Date | null
   notes?: string | null
+  dispatchedBy?: string | null
+  /**
+   * Ask the configured carrier to book the parcel and return an AWB
+   * (FR-21.3). Ignored when the adapter cannot create shipments.
+   */
+  bookWithProvider?: boolean
   actorId: string
 }
 
@@ -107,8 +118,13 @@ export async function createShipment(input: CreateShipmentInput) {
         trackingNumber,
         trackingUrl: trackingUrlFor(carrier, trackingNumber),
         weightGrams: input.weightGrams ?? null,
+        lengthMm: input.lengthMm ?? null,
+        widthMm: input.widthMm ?? null,
+        heightMm: input.heightMm ?? null,
         estimatedAt: input.estimatedAt ?? null,
         notes: input.notes ?? null,
+        dispatchedBy: input.dispatchedBy ?? null,
+        packedAt: new Date(),
         shippedAt: trackingNumber ? new Date() : null,
         items: { create: input.items },
         events: {
@@ -172,8 +188,37 @@ export async function createShipment(input: CreateShipmentInput) {
 const TERMINAL: ShipmentStatus[] = ['DELIVERED', 'RETURNED_TO_ORIGIN', 'CANCELLED']
 
 /**
+ * How far along the journey each state is.
+ *
+ * Used only to detect a carrier event arriving *behind* where the parcel has
+ * already got to. Side states (exception, failed) sit off the ladder: they can
+ * happen at any point and are never treated as going backwards.
+ */
+const PROGRESS: Partial<Record<ShipmentStatus, number>> = {
+  PENDING: 0,
+  READY_TO_SHIP: 1,
+  IN_TRANSIT: 2,
+  OUT_FOR_DELIVERY: 3,
+  DELIVERED: 4,
+  RETURNED_TO_ORIGIN: 4,
+}
+
+/** True when `next` would move the parcel back down the ladder. */
+export function isBackwards(current: ShipmentStatus, next: ShipmentStatus): boolean {
+  const from = PROGRESS[current]
+  const to = PROGRESS[next]
+  if (from === undefined || to === undefined) return false
+  return to < from
+}
+
+/**
  * Records a tracking update. Every change appends an event, so the trail the
  * customer sees is the history rather than a reconstruction of it.
+ *
+ * `source` decides how strict this is. An operator acting deliberately is
+ * blocked from reopening a closed parcel; a carrier callback that arrives out
+ * of order is *recorded but not applied*, and the shipment is flagged for
+ * review instead — losing the event would be worse than holding it.
  */
 export async function updateShipmentStatus(args: {
   shipmentId: string
@@ -182,7 +227,12 @@ export async function updateShipmentStatus(args: {
   location?: string | null
   occurredAt?: Date
   actorId: string | null
+  source?: 'manual' | 'provider' | 'system'
+  providerEventId?: string | null
+  providerStatus?: string | null
 }) {
+  const source = args.source ?? 'manual'
+
   return prisma.$transaction(async (tx) => {
     const shipment = await tx.shipment.findUnique({
       where: { id: args.shipmentId },
@@ -190,11 +240,47 @@ export async function updateShipmentStatus(args: {
     })
     if (!shipment) throw new NotFoundError('Shipment', 'SHIPMENT_NOT_FOUND')
 
-    if (TERMINAL.includes(shipment.status) && shipment.status !== args.status) {
+    const eventData = {
+      status: args.status,
+      message: args.message ?? null,
+      location: args.location ?? null,
+      occurredAt: args.occurredAt ?? new Date(),
+      source,
+      providerEventId: args.providerEventId ?? null,
+      providerStatus: args.providerStatus ?? null,
+    }
+
+    /**
+     * Out-of-order carrier event. The trail keeps it — it genuinely happened —
+     * but the status stays where it is and a human is asked to look.
+     */
+    if (source === 'provider' && isBackwards(shipment.status, args.status)) {
+      return tx.shipment.update({
+        where: { id: args.shipmentId },
+        data: {
+          needsReview: true,
+          reviewReason: `Carrier reported "${args.providerStatus ?? args.status}" after the parcel was already ${shipment.status.toLowerCase().replace(/_/g, ' ')}`,
+          events: { create: { ...eventData, ignoredForStatus: true } },
+        },
+        include: { items: true, events: { orderBy: { occurredAt: 'asc' } } },
+      })
+    }
+
+    if (source !== 'provider' && TERMINAL.includes(shipment.status) && shipment.status !== args.status) {
       throw new ConflictError(
         `A ${shipment.status.toLowerCase().replace(/_/g, ' ')} shipment cannot change status`,
         'SHIPMENT_CLOSED',
       )
+    }
+
+    // Repeating the current status is not an error — carriers send the same
+    // state more than once — but it should not restamp the timestamps.
+    if (shipment.status === args.status) {
+      return tx.shipment.update({
+        where: { id: args.shipmentId },
+        data: { events: { create: eventData } },
+        include: { items: true, events: { orderBy: { occurredAt: 'asc' } } },
+      })
     }
 
     const updated = await tx.shipment.update({
@@ -203,14 +289,18 @@ export async function updateShipmentStatus(args: {
         status: args.status,
         ...(args.status === 'IN_TRANSIT' && !shipment.shippedAt ? { shippedAt: new Date() } : {}),
         ...(args.status === 'DELIVERED' ? { deliveredAt: args.occurredAt ?? new Date() } : {}),
-        events: {
-          create: {
-            status: args.status,
-            message: args.message ?? null,
-            location: args.location ?? null,
-            occurredAt: args.occurredAt ?? new Date(),
-          },
-        },
+        // A parcel that recovers from an exception no longer needs looking at.
+        ...(args.status === 'IN_TRANSIT' || args.status === 'OUT_FOR_DELIVERY' || args.status === 'DELIVERED'
+          ? { needsReview: false, reviewReason: null }
+          : {}),
+        // An exception is exactly what an operator should see.
+        ...(args.status === 'EXCEPTION' || args.status === 'FAILED'
+          ? {
+              needsReview: true,
+              reviewReason: args.message ?? `Carrier reported ${args.status.toLowerCase()}`,
+            }
+          : {}),
+        events: { create: eventData },
       },
       include: { items: true, events: { orderBy: { occurredAt: 'asc' } } },
     })
@@ -242,6 +332,130 @@ export async function updateShipmentStatus(args: {
 
     return updated
   })
+}
+
+/**
+ * Books an already-created shipment with the carrier (FR-21.3, FR-21.4).
+ *
+ * Deliberately a second step, outside the creation transaction: holding a
+ * database transaction open across a call to a third party is how connection
+ * pools die, and a carrier that times out must leave a shipment we can retry
+ * rather than rolling back goods that are already packed.
+ */
+export async function bookWithProvider(shipmentId: string) {
+  const provider = getShippingProvider()
+  if (!provider.canCreateShipments) {
+    throw new ConflictError(
+      'This delivery method is booked by hand. Record the tracking number once the courier gives you one.',
+      'SHIPPING_PROVIDER_MANUAL',
+    )
+  }
+
+  const shipment = await prisma.shipment.findUnique({
+    where: { id: shipmentId },
+    include: {
+      items: { include: { orderItem: true } },
+      order: true,
+    },
+  })
+  if (!shipment) throw new NotFoundError('Shipment', 'SHIPMENT_NOT_FOUND')
+
+  if (shipment.providerShipmentId) {
+    throw new ConflictError('That parcel is already booked with the carrier', 'ALREADY_BOOKED')
+  }
+
+  const address = shipment.order.shippingAddressSnapshot as Record<string, string | null>
+
+  const booked = await provider.createShipment({
+    shipmentNumber: shipment.shipmentNumber,
+    orderNumber: shipment.order.orderNumber,
+    to: {
+      name: address.name ?? '',
+      phone: address.phone ?? '',
+      addressLine1: address.addressLine1 ?? '',
+      addressLine2: address.addressLine2,
+      city: address.city ?? '',
+      state: address.state ?? '',
+      postalCode: address.postalCode ?? '',
+      country: address.country ?? 'IN',
+    },
+    items: shipment.items.map((item) => ({
+      name: item.orderItem.productNameSnapshot,
+      sku: item.orderItem.sku,
+      quantity: item.quantity,
+      unitPrice: item.orderItem.unitPrice,
+    })),
+    weightGrams: shipment.weightGrams ?? (await orderWeightGrams(shipment.orderId)),
+    lengthMm: shipment.lengthMm,
+    widthMm: shipment.widthMm,
+    heightMm: shipment.heightMm,
+  })
+
+  const carrier = booked.carrier ?? shipment.carrier
+  const trackingNumber = booked.trackingNumber ?? shipment.trackingNumber
+
+  return prisma.shipment.update({
+    where: { id: shipmentId },
+    data: {
+      provider: provider.name,
+      providerShipmentId: booked.providerShipmentId,
+      carrier,
+      trackingNumber,
+      trackingUrl: trackingUrlFor(carrier, trackingNumber),
+      labelUrl: booked.labelUrl ?? null,
+      estimatedAt: booked.estimatedAt ?? shipment.estimatedAt,
+      events: {
+        create: {
+          status: shipment.status,
+          message: `Booked with ${provider.name}`,
+          source: 'system',
+        },
+      },
+    },
+    include: shipmentInclude,
+  })
+}
+
+/**
+ * Applies a verified carrier callback (FR-21.5).
+ *
+ * Matching is by the carrier's own shipment id first, then the tracking
+ * number — nothing else in the payload is trusted to identify a parcel.
+ * Returns null when the event cannot be matched, which the webhook route
+ * records as a skipped event rather than an error.
+ */
+export async function applyCarrierEvent(event: CarrierEvent) {
+  const shipment = event.providerShipmentId
+    ? await prisma.shipment.findUnique({ where: { providerShipmentId: event.providerShipmentId } })
+    : event.trackingNumber
+      ? await prisma.shipment.findFirst({
+          where: { trackingNumber: event.trackingNumber },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null
+
+  if (!shipment) return null
+
+  const updated = await updateShipmentStatus({
+    shipmentId: shipment.id,
+    status: event.status,
+    message: event.message,
+    location: event.location,
+    occurredAt: event.occurredAt,
+    actorId: null,
+    source: 'provider',
+    providerEventId: event.eventId,
+    providerStatus: event.providerStatus,
+  })
+
+  const order = await prisma.order.findUniqueOrThrow({
+    where: { id: shipment.orderId },
+    select: { id: true, orderNumber: true },
+  })
+
+  announceShipment(updated, order, null)
+
+  return { shipment: updated, order }
 }
 
 export function announceShipment(
