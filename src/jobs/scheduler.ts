@@ -18,10 +18,14 @@ import { logger } from '../config/logger.js'
 /** How often to look. A minute is well inside any sensible publishing SLA. */
 const INTERVAL_MS = 60_000
 
-export async function publishDueContent(): Promise<{ products: number; pages: number }> {
+export async function publishDueContent(): Promise<{
+  products: number
+  pages: number
+  showcase: number
+}> {
   const now = new Date()
 
-  const [products, pages] = await Promise.all([
+  const [products, pages, showcase] = await Promise.all([
     prisma.product.updateMany({
       where: { status: 'SCHEDULED', scheduledFor: { not: null, lte: now } },
       data: { status: 'ACTIVE', publishedAt: now, scheduledFor: null },
@@ -30,16 +34,31 @@ export async function publishDueContent(): Promise<{ products: number; pages: nu
       where: { status: 'SCHEDULED', scheduledFor: { not: null, lte: now } },
       data: { status: 'PUBLISHED', publishedAt: now, scheduledFor: null },
     }),
+    /**
+     * Showcase items carry the same consent guard as the rest of the module,
+     * so the WHERE clause repeats it rather than trusting that nothing has
+     * changed since the item was scheduled. Consent can be withdrawn between
+     * scheduling and the publish window, and this job is the last gate before
+     * someone's face appears on the homepage.
+     */
+    prisma.showcaseItem.updateMany({
+      where: {
+        status: 'SCHEDULED',
+        scheduledFor: { not: null, lte: now },
+        consentGrantedAt: { not: null },
+      },
+      data: { status: 'ACTIVE', publishedAt: now, scheduledFor: null },
+    }),
   ])
 
-  if (products.count > 0 || pages.count > 0) {
+  if (products.count > 0 || pages.count > 0 || showcase.count > 0) {
     logger.info(
-      { products: products.count, pages: pages.count },
+      { products: products.count, pages: pages.count, showcase: showcase.count },
       'Published scheduled content',
     )
   }
 
-  return { products: products.count, pages: pages.count }
+  return { products: products.count, pages: pages.count, showcase: showcase.count }
 }
 
 let timer: NodeJS.Timeout | null = null

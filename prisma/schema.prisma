@@ -240,6 +240,7 @@ model Product {
   reviews  Review[]
   wishlist WishlistItem[]
   coupons  CouponProduct[]
+  showcase ShowcaseProduct[]
 
   @@index([status])
   @@index([categoryId])
@@ -1598,4 +1599,100 @@ model AnalyticsEvent {
   @@index([type, createdAt])
   @@index([entityType, entityId, createdAt])
   @@map("analytics_events")
+}
+
+// ============================================================================
+// Customer showcase — the "as worn by you" video wall
+// ============================================================================
+
+enum ShowcaseStatus {
+  DRAFT
+  /// Publishes automatically once `scheduledFor` passes.
+  SCHEDULED
+  ACTIVE
+  ARCHIVED
+}
+
+enum ShowcaseMediaType {
+  VIDEO
+  IMAGE
+}
+
+/// A customer's photo or video of themselves in a piece, shown on the
+/// storefront as social proof.
+///
+/// Curated rather than submitted: an admin adds each item, because this is a
+/// marketing surface and an open upload form on the homepage is a moderation
+/// problem nobody wants. That is also why it is not the `Review` model —
+/// reviews are customer-authored, carry a rating and attach to one product,
+/// and moderating them into a video wall would conflate two different jobs.
+model ShowcaseItem {
+  id String @id @default(cuid())
+
+  mediaType ShowcaseMediaType @default(VIDEO)
+  mediaUrl  String
+  /// Still frame shown before the video loads.
+  ///
+  /// Required for video, enforced at the service layer. Four autoplaying
+  /// videos with no poster means the largest element on the homepage is
+  /// nothing at all until the first frame decodes, which is the difference
+  /// between hitting the LCP target and missing it.
+  posterUrl String?
+
+  /// Alt text for the image, or a description of the video for anyone who
+  /// cannot see it. Required — this is content, not decoration.
+  altText String
+
+  caption String?
+
+  // ---- who made it, and whether we may use it ----
+
+  /// Display name, e.g. "Ananya R." Kept short and first-name-plus-initial by
+  /// convention; the admin form says so.
+  creditName String?
+  /// Social handle without the @.
+  creditHandle String?
+  /// Where it came from, so the permission can be traced back to a real post.
+  sourceUrl String?
+
+  /// When permission to use this was obtained.
+  ///
+  /// The customer owns the video and their own likeness, so publishing without
+  /// this is a copyright and personality-rights problem, not a nicety. Nothing
+  /// can be set ACTIVE while it is null.
+  consentGrantedAt DateTime?
+  /// How permission was given — "replied to our comment 12 Aug", "DM screenshot
+  /// on file". The evidence, in one line.
+  consentNote String?
+
+  status       ShowcaseStatus @default(DRAFT)
+  scheduledFor DateTime?
+  publishedAt  DateTime?
+  /// Ascending. Ties break on createdAt so the order is always total.
+  position Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products ShowcaseProduct[]
+
+  @@index([status, position])
+  @@map("showcase_items")
+}
+
+/// The pieces visible in a showcase item — "shop this look".
+///
+/// A join table rather than an array of ids so a deleted product cannot leave
+/// a link pointing at nothing.
+model ShowcaseProduct {
+  showcaseItemId String
+  productId      String
+  position       Int    @default(0)
+
+  item    ShowcaseItem @relation(fields: [showcaseItemId], references: [id], onDelete: Cascade)
+  product Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([showcaseItemId, productId])
+  @@index([productId])
+  @@map("showcase_products")
 }

@@ -40,6 +40,7 @@ import {
   adminWebhookRouter,
 } from './modules/rbac/rbac.routes.js'
 import { analyticsRouter } from './modules/analytics/analytics.routes.js'
+import { adminShowcaseRouter, showcaseRouter } from './modules/showcase/showcase.routes.js'
 import { adminPrivacyRouter, privacyRouter } from './modules/privacy/privacy.routes.js'
 import {
   adminCustomerRouter,
@@ -71,6 +72,7 @@ apiRouter.use('/redirects', redirectRouter)
 apiRouter.use('/seo', seoRouter)
 apiRouter.use('/reviews', reviewRouter)
 apiRouter.use('/analytics', analyticsRouter)
+apiRouter.use('/showcase', showcaseRouter)
 
 // ------------------------------------------------------ authenticated only
 apiRouter.use('/addresses', addressRouter)
@@ -137,6 +139,7 @@ adminRouter.use('/returns', adminReturnRouter)
 adminRouter.use('/refunds', adminRefundRouter)
 adminRouter.use('/pages', adminPageRouter)
 adminRouter.use('/redirects', adminRedirectRouter)
+adminRouter.use('/showcase', adminShowcaseRouter)
 adminRouter.use('/messaging', adminMessageRouter)
 adminRouter.use('/reviews', adminReviewRouter)
 adminRouter.use('/attributes', adminAttributeRouter)

@@ -418,6 +418,16 @@ Worth doing before real traffic:
 - **Object storage.** `STORAGE_PROVIDER=local` with a volume works, but it ties
   uploads to one host. `S3StorageProvider` is a stub — implementing that one
   interface is the only change needed.
+- **Video, if you use the customer showcase.** Serving showcase clips from the
+  app container is the one place local storage genuinely hurts: every homepage
+  visit that scrolls to the wall pulls several megabytes through Node, which is
+  neither what it is good at nor what it should be spending its time on. The
+  storefront already limits the damage — nothing loads until a tile is near the
+  viewport, and tiles pause when scrolled away — but put the media on object
+  storage behind a CDN before this sees real traffic. Keep clips short and
+  compressed: under 10 seconds and under 3 MB each is a good ceiling. The
+  40 MB upload limit is what the admin may upload, not what a customer should
+  be asked to download.
 - **Email.** `EMAIL_PROVIDER=console` logs order confirmations instead of sending
   them. Implement `EmailProvider` for Resend/SendGrid/SES.
 - **Backups.** Dokploy can schedule PostgreSQL backups. Turn them on.

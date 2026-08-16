@@ -155,6 +155,8 @@ async function wipe() {
   await prisma.shippingRate.deleteMany()
   await prisma.shippingMethod.deleteMany()
   await prisma.shippingZone.deleteMany()
+  await prisma.showcaseProduct.deleteMany()
+  await prisma.showcaseItem.deleteMany()
   await prisma.pageRevision.deleteMany()
   await prisma.page.deleteMany()
   await prisma.redirect.deleteMany()
@@ -467,6 +469,12 @@ async function seedSettings() {
           ctaHref: '/categories/dresses',
         },
         { type: 'new-arrivals', heading: 'New Arrivals', limit: 8 },
+        {
+          type: 'showcase',
+          heading: 'As worn by you',
+          body: 'Our pieces, out in the world. Shared with permission.',
+          limit: 8,
+        },
         {
           type: 'category-banner',
           heading: 'Shop by category',
@@ -977,6 +985,94 @@ function installSeedMedia() {
   console.log(`  demo media copied into ${env.STORAGE_LOCAL_DIR}/products`)
 }
 
+/**
+ * Demo customer showcase.
+ *
+ * Seeded as IMAGE items using the demo photography already in `seed-assets/`,
+ * not video: shipping a 40 MB clip in the repository to demonstrate a homepage
+ * section would be a poor trade, and the video path is covered by the tests
+ * instead. A real store replaces these with customer clips from admin.
+ *
+ * Consent is stamped on every seeded row so the wall renders — the guard that
+ * blocks publishing without it is exercised in `smoke-showcase.mjs`, where a
+ * missing consent date is supposed to fail.
+ */
+async function seedShowcase() {
+
+  const ITEMS: Array<{
+    handle: string
+    altText: string
+    caption: string
+    creditName: string
+    creditHandle: string
+  }> = [
+    {
+      handle: 'amaira-halterneck-column-dress',
+      altText: 'A customer in the Amaira halterneck column dress on a hotel terrace at golden hour',
+      caption: 'Wore this to a rooftop dinner and did not want to take it off.',
+      creditName: 'Ananya R.',
+      creditHandle: 'ananya.wears',
+    },
+    {
+      handle: 'anjum-block-print-kurta-set',
+      altText: 'A customer in the Anjum block-print kurta set standing in a garden',
+      caption: 'The block print is even better in daylight.',
+      creditName: 'Meera S.',
+      creditHandle: 'meera.and.co',
+    },
+    {
+      handle: 'bela-pintuck-kurta-set',
+      altText: 'A customer in the Bela pintuck kurta set at a family lunch',
+      caption: 'Third wedding in this. Nobody has noticed.',
+      creditName: 'Divya K.',
+      creditHandle: 'divyakrishnan',
+    },
+    {
+      handle: 'kiran-silk-scarf',
+      altText: 'A customer wearing the Kiran silk scarf knotted at the neck',
+      caption: 'Bought it for one trip, have not taken it off since.',
+      creditName: 'Riya P.',
+      creditHandle: 'riya.p',
+    },
+  ]
+
+  const slugs = ITEMS.map((item) => item.handle)
+  const products = await prisma.product.findMany({
+    where: { slug: { in: slugs } },
+    select: { id: true, slug: true },
+  })
+  const bySlug = new Map(products.map((p) => [p.slug, p]))
+
+  const consentGrantedAt = new Date()
+  let created = 0
+
+  for (const [index, item] of ITEMS.entries()) {
+    const product = bySlug.get(item.handle)
+    if (!product) continue
+
+    await prisma.showcaseItem.create({
+      data: {
+        mediaType: 'IMAGE',
+        mediaUrl: `${env.STORAGE_PUBLIC_URL}/products/${item.handle}-1.jpg`,
+        posterUrl: `${env.STORAGE_PUBLIC_URL}/products/${item.handle}-1.jpg`,
+        altText: item.altText,
+        caption: item.caption,
+        creditName: item.creditName,
+        creditHandle: item.creditHandle,
+        consentGrantedAt,
+        consentNote: 'Demo content — permission recorded at seed time',
+        status: 'ACTIVE',
+        publishedAt: consentGrantedAt,
+        position: index,
+        products: { create: [{ productId: product.id, position: 0 }] },
+      },
+    })
+    created++
+  }
+
+  return created
+}
+
 async function main() {
   assertSafeToWipe()
 
@@ -1021,6 +1117,9 @@ async function main() {
 
   const coupons = await seedCoupons()
   console.log(`  ${coupons} coupons`)
+
+  const showcase = await seedShowcase()
+  console.log(`  ${showcase} customer showcase items`)
   console.log('\nSign in (development only — from your environment):')
   console.log(`  admin     ${env.ADMIN_EMAIL} / ${env.ADMIN_PASSWORD}`)
   console.log(`  customer  ${env.CUSTOMER_EMAIL} / ${env.CUSTOMER_PASSWORD}`)
