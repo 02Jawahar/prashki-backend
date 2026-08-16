@@ -10,8 +10,43 @@ export const publicListQuery = z.object({
     .enum(['true', 'false'])
     .transform((v) => v === 'true')
     .optional(),
+  /**
+   * Attribute facets as "attribute-slug:value-slug", comma separated:
+   *
+   *   ?attributes=size:m,size:l,colour:sage
+   *
+   * Values within one attribute are OR'd (any of these sizes); different
+   * attributes are AND'd (that size *and* that colour) — which is what a
+   * shopper means when they tick two boxes in different filter groups.
+   */
+  attributes: z
+    .string()
+    .trim()
+    .max(400)
+    .optional()
+    .transform((raw) => {
+      if (!raw) return undefined
+      const grouped = new Map<string, string[]>()
+      for (const pair of raw.split(',')) {
+        const [attribute, value] = pair.split(':').map((s) => s.trim().toLowerCase())
+        if (!attribute || !value) continue
+        grouped.set(attribute, [...(grouped.get(attribute) ?? []), value])
+      }
+      return grouped.size > 0 ? grouped : undefined
+    }),
+  /** Minimum average rating, 1–5. */
+  minRating: z.coerce.number().min(1).max(5).optional(),
   sort: z
-    .enum(['newest', 'oldest', 'price-asc', 'price-desc', 'name-asc', 'name-desc', 'featured'])
+    .enum([
+      'newest',
+      'oldest',
+      'price-asc',
+      'price-desc',
+      'name-asc',
+      'name-desc',
+      'featured',
+      'rating',
+    ])
     .default('featured'),
   page: z.coerce.number().int().min(1).default(1),
   perPage: z.coerce.number().int().min(1).max(48).default(12),
@@ -19,7 +54,7 @@ export const publicListQuery = z.object({
 
 /** Admin listing — can see every status. */
 export const adminListQuery = publicListQuery.extend({
-  status: z.enum(['DRAFT', 'ACTIVE', 'ARCHIVED']).optional(),
+  status: z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'INACTIVE', 'ARCHIVED']).optional(),
   perPage: z.coerce.number().int().min(1).max(100).default(20),
 })
 
@@ -49,7 +84,7 @@ export const createProductSchema = z
     sku,
     price: paise,
     compareAtPrice: paise.optional().nullable(),
-    status: z.enum(['DRAFT', 'ACTIVE', 'ARCHIVED']).default('DRAFT'),
+    status: z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'INACTIVE', 'ARCHIVED']).default('DRAFT'),
     featured: z.boolean().default(false),
     categoryId: z.string().trim().min(1).nullable().optional(),
     variants: z
@@ -79,7 +114,7 @@ export const updateProductSchema = z
     sku: sku.optional(),
     price: paise.optional(),
     compareAtPrice: paise.nullable().optional(),
-    status: z.enum(['DRAFT', 'ACTIVE', 'ARCHIVED']).optional(),
+    status: z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'INACTIVE', 'ARCHIVED']).optional(),
     featured: z.boolean().optional(),
     categoryId: z.string().trim().min(1).nullable().optional(),
   })
@@ -89,7 +124,7 @@ export const updateProductSchema = z
   )
 
 export const publishSchema = z.object({
-  status: z.enum(['DRAFT', 'ACTIVE', 'ARCHIVED']),
+  status: z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'INACTIVE', 'ARCHIVED']),
 })
 
 export const createVariantSchema = z.object({

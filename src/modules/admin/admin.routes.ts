@@ -6,6 +6,8 @@ import { validate } from '../../middleware/validate.js'
 import { writeLimiter } from '../../middleware/rate-limit.js'
 import { ok, pageMeta } from '../../utils/response.js'
 import { recordAudit } from '../../utils/audit.js'
+import { NotFoundError } from '../../utils/errors.js'
+import { maskContact } from '../../utils/pii.js'
 import { lowStock, movementHistory } from '../inventory/inventory.service.js'
 
 export const adminDashboardRouter: Router = Router()
@@ -249,17 +251,22 @@ adminCustomerRouter.get(
     return ok(
       res,
       {
-        customers: rows.map((c) => ({
-          id: c.id,
-          name: c.name,
-          email: c.email,
-          phone: c.phone,
-          status: c.status,
-          emailVerified: c.emailVerified,
-          orderCount: c._count.orders,
-          createdAt: c.createdAt,
-          lastLoginAt: c.lastLoginAt,
-        })),
+        customers: rows.map((c) =>
+          maskContact(
+            {
+              id: c.id,
+              name: c.name,
+              email: c.email,
+              phone: c.phone,
+              status: c.status,
+              emailVerified: c.emailVerified,
+              orderCount: c._count.orders,
+              createdAt: c.createdAt,
+              lastLoginAt: c.lastLoginAt,
+            },
+            req.user?.permissions,
+          ),
+        ),
       },
       { pagination: pageMeta(q.page, q.perPage, total) },
     )
@@ -286,6 +293,10 @@ adminCustomerRouter.get('/:id', requirePermission('customer.read'), async (req, 
         take: 20,
         select: { id: true, orderNumber: true, status: true, total: true, createdAt: true },
       },
+      internalNotes: {
+        orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+        include: { author: { select: { id: true, name: true } } },
+      },
     },
   })
 
@@ -300,8 +311,96 @@ adminCustomerRouter.get('/:id', requirePermission('customer.read'), async (req, 
     _sum: { total: true },
   })
 
-  return ok(res, { customer: { ...customer, totalSpend: spend._sum.total ?? 0 } })
+  return ok(res, {
+    customer: {
+      ...maskContact(customer, req.user?.permissions),
+      totalSpend: spend._sum.total ?? 0,
+    },
+  })
 })
+
+// ------------------------------------------------------------ customer notes
+
+const noteSchema = z.object({
+  body: z.string().trim().min(1, 'Write something').max(4000),
+  isPinned: z.boolean().optional(),
+})
+
+/**
+ * Staff-only notes on a customer (FR-10.5). These are never returned by any
+ * customer-facing endpoint — the only reads are on this admin subtree.
+ */
+adminCustomerRouter.post(
+  '/:id/notes',
+  writeLimiter,
+  requirePermission('customer.update'),
+  validate({ body: noteSchema }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const input = req.validated!.body as z.infer<typeof noteSchema>
+
+    const customer = await prisma.user.findFirst({ where: { id }, select: { id: true } })
+    if (!customer) throw new NotFoundError('Customer', 'CUSTOMER_NOT_FOUND')
+
+    const note = await prisma.customerNote.create({
+      data: {
+        userId: id,
+        authorId: req.user!.id,
+        body: input.body,
+        isPinned: input.isPinned ?? false,
+      },
+      include: { author: { select: { id: true, name: true } } },
+    })
+
+    recordAudit({ action: 'CUSTOMER_NOTE_CREATED', entityType: 'User', entityId: id, req })
+
+    return ok(res, { note })
+  },
+)
+
+adminCustomerRouter.patch(
+  '/:id/notes/:noteId',
+  writeLimiter,
+  requirePermission('customer.update'),
+  validate({ body: noteSchema.partial() }),
+  async (req, res) => {
+    const { id, noteId } = req.params as { id: string; noteId: string }
+    const input = req.validated!.body as Partial<z.infer<typeof noteSchema>>
+
+    // Scoped by userId as well as id, so a note cannot be moved between
+    // customers by guessing an id.
+    const existing = await prisma.customerNote.findFirst({ where: { id: noteId, userId: id } })
+    if (!existing) throw new NotFoundError('Note', 'NOTE_NOT_FOUND')
+
+    const note = await prisma.customerNote.update({
+      where: { id: noteId },
+      data: {
+        ...(input.body !== undefined ? { body: input.body } : {}),
+        ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
+      },
+      include: { author: { select: { id: true, name: true } } },
+    })
+
+    return ok(res, { note })
+  },
+)
+
+adminCustomerRouter.delete(
+  '/:id/notes/:noteId',
+  writeLimiter,
+  requirePermission('customer.update'),
+  async (req, res) => {
+    const { id, noteId } = req.params as { id: string; noteId: string }
+
+    const existing = await prisma.customerNote.findFirst({ where: { id: noteId, userId: id } })
+    if (!existing) throw new NotFoundError('Note', 'NOTE_NOT_FOUND')
+
+    await prisma.customerNote.delete({ where: { id: noteId } })
+    recordAudit({ action: 'CUSTOMER_NOTE_DELETED', entityType: 'User', entityId: id, req })
+
+    return ok(res, { deleted: true })
+  },
+)
 
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) })
 

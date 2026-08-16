@@ -48,6 +48,25 @@ export interface WebhookEvent {
   payload: unknown
 }
 
+export interface RefundInput {
+  /** The gateway's payment id, captured when the payment succeeded. */
+  providerPaymentId: string
+  /** integer paise; may be less than the payment for a partial refund. */
+  amount: number
+  /** Our own reference, so the gateway dashboard lines up with our records. */
+  reference: string
+  reason?: string
+}
+
+export interface ProviderRefund {
+  /** The gateway's refund id. Stored unique so a replayed webhook is a no-op. */
+  providerRefundId: string
+  amount: number
+  /** 'pending' while the gateway is still processing; 'processed' when done. */
+  status: 'pending' | 'processed' | 'failed'
+  raw: unknown
+}
+
 export interface PaymentProvider {
   readonly name: string
   /** True when the provider has everything it needs to actually transact. */
@@ -57,4 +76,6 @@ export interface PaymentProvider {
   verifyPayment(input: VerifyPaymentInput): Promise<VerifiedPayment>
   /** Verifies a webhook against its signature, using the RAW body bytes. */
   parseWebhook(rawBody: Buffer, signature: string | undefined): WebhookEvent | null
+  /** Sends money back. Never called from a customer-facing route. */
+  refund(input: RefundInput): Promise<ProviderRefund>
 }

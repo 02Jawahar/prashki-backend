@@ -4,7 +4,14 @@ import { ok, created } from '../../utils/response.js'
 import { AuthenticationError } from '../../utils/errors.js'
 import { REFRESH_COOKIE, clearAuthCookies, setAuthCookies } from '../../utils/tokens.js'
 import * as authService from './auth.service.js'
-import type { ChangePasswordInput, LoginInput, RegisterInput } from './auth.schemas.js'
+import type {
+  ChangePasswordInput,
+  ForgotPasswordInput,
+  LoginInput,
+  RegisterInput,
+  ResetPasswordInput,
+  UpdateProfileInput,
+} from './auth.schemas.js'
 import { mergeGuestCart } from '../cart/cart.service.js'
 
 export async function registerHandler(req: Request, res: Response) {
@@ -60,4 +67,30 @@ export async function changePasswordHandler(req: Request, res: Response) {
 
   clearAuthCookies(res)
   return ok(res, { passwordChanged: true })
+}
+
+export async function forgotPasswordHandler(req: Request, res: Response) {
+  const { email } = req.validated!.body as ForgotPasswordInput
+  await authService.requestPasswordReset(email, req)
+
+  // Always the same answer — see the service for why.
+  return ok(res, {
+    requested: true,
+    message: 'If that email has an account, a reset link is on its way.',
+  })
+}
+
+export async function resetPasswordHandler(req: Request, res: Response) {
+  const input = req.validated!.body as ResetPasswordInput
+  await authService.resetPassword(input.token, input.password, req)
+
+  // Every session was revoked, so any cookies this browser holds are now dead.
+  clearAuthCookies(res)
+  return ok(res, { passwordReset: true })
+}
+
+export async function updateProfileHandler(req: Request, res: Response) {
+  const input = req.validated!.body as UpdateProfileInput
+  const user = await authService.updateProfile(req.user!.id, input, req)
+  return ok(res, { user })
 }

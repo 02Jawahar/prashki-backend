@@ -7,6 +7,8 @@ import type {
   CreateProviderOrderInput,
   PaymentProvider,
   ProviderOrder,
+  ProviderRefund,
+  RefundInput,
   VerifiedPayment,
   VerifyPaymentInput,
   WebhookEvent,
@@ -92,6 +94,31 @@ export class RazorpayProvider implements PaymentProvider {
       valid,
       providerPaymentId: input.providerPaymentId,
       reason: valid ? undefined : 'Signature verification failed',
+    }
+  }
+
+  /**
+   * Razorpay refunds are asynchronous: the call returns immediately with a
+   * refund id and a status that may still be `pending`. The final outcome
+   * arrives by webhook, which is why the refund id is what we store and key on.
+   */
+  async refund(input: RefundInput): Promise<ProviderRefund> {
+    try {
+      const refund = await this.sdk.payments.refund(input.providerPaymentId, {
+        amount: input.amount,
+        speed: 'normal',
+        notes: { reference: input.reference, reason: input.reason ?? '' },
+      })
+
+      return {
+        providerRefundId: refund.id,
+        amount: Number(refund.amount),
+        status: refund.status === 'processed' ? 'processed' : refund.status === 'failed' ? 'failed' : 'pending',
+        raw: refund,
+      }
+    } catch (err) {
+      logger.error({ err, providerPaymentId: input.providerPaymentId }, 'Razorpay refund failed')
+      throw new IntegrationError('The refund could not be sent to the gateway', 'REFUND_FAILED')
     }
   }
 

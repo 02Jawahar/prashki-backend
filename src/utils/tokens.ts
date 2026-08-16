@@ -52,7 +52,21 @@ export function generateRefreshToken(): { token: string; hash: string; family: s
 }
 
 export function hashRefreshToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex')
+  return sha256(token)
+}
+
+export function sha256(value: string): string {
+  return crypto.createHash('sha256').update(value).digest('hex')
+}
+
+/**
+ * A single-use, high-entropy token for password resets and email verification.
+ * Same reasoning as the refresh token: only the hash is stored, so a database
+ * leak yields nothing usable.
+ */
+export function generateOpaqueToken(): { token: string; hash: string } {
+  const token = crypto.randomBytes(32).toString('base64url')
+  return { token, hash: sha256(token) }
 }
 
 export function refreshExpiry(): Date {

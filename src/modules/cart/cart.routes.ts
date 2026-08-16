@@ -4,6 +4,8 @@ import { prisma } from '../../config/db.js'
 import { validate } from '../../middleware/validate.js'
 import { ok, noContent } from '../../utils/response.js'
 import { ConflictError, NotFoundError } from '../../utils/errors.js'
+import { writeLimiter } from '../../middleware/rate-limit.js'
+import { evaluateCoupon, normalizeCode } from '../coupons/coupon.service.js'
 import { resolveCart } from './cart.service.js'
 import { cartInclude, loadCart, serializeCart } from './cart.serializer.js'
 
@@ -24,7 +26,7 @@ const updateItemSchema = z.object({
 
 cartRouter.get('/', async (req, res) => {
   const cart = await resolveCart(req, res)
-  return ok(res, { cart: serializeCart(await loadCart(cart.id)) })
+  return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })
 })
 
 cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) => {
@@ -62,7 +64,7 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
     update: { quantity: desired },
   })
 
-  return ok(res, { cart: serializeCart(await loadCart(cart.id)) })
+  return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })
 })
 
 cartRouter.patch('/items/:itemId', validate({ body: updateItemSchema }), async (req, res) => {
@@ -90,7 +92,7 @@ cartRouter.patch('/items/:itemId', validate({ body: updateItemSchema }), async (
     await prisma.cartItem.update({ where: { id: itemId }, data: { quantity } })
   }
 
-  return ok(res, { cart: serializeCart(await loadCart(cart.id)) })
+  return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })
 })
 
 cartRouter.delete('/items/:itemId', async (req, res) => {
@@ -101,13 +103,82 @@ cartRouter.delete('/items/:itemId', async (req, res) => {
   if (!item || item.cartId !== cart.id) throw new NotFoundError('Cart item', 'CART_ITEM_NOT_FOUND')
 
   await prisma.cartItem.delete({ where: { id: itemId } })
-  return ok(res, { cart: serializeCart(await loadCart(cart.id)) })
+  return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })
 })
 
 cartRouter.delete('/', async (req, res) => {
   const cart = await resolveCart(req, res)
-  await prisma.cartItem.deleteMany({ where: { cartId: cart.id } })
+  await prisma.cart.update({
+    where: { id: cart.id },
+    // An emptied bag should not keep a coupon primed for whatever goes in next.
+    data: { couponCode: null, items: { deleteMany: {} } },
+  })
   return noContent(res)
+})
+
+// ------------------------------------------------------------------- coupons
+
+const couponSchema = z.object({
+  code: z.string().trim().min(2, 'Enter a code').max(60),
+})
+
+/**
+ * Applying a coupon stores only the code (M13). The discount is recomputed on
+ * every read, so nothing here can be replayed or tampered with — the worst a
+ * forged request achieves is naming a code the customer could have typed.
+ */
+cartRouter.post('/coupon', writeLimiter, validate({ body: couponSchema }), async (req, res) => {
+  const { code } = req.validated!.body as z.infer<typeof couponSchema>
+  const cart = await resolveCart(req, res)
+  const loaded = await loadCart(cart.id)
+
+  const purchasable = loaded.items
+    .filter((i) => i.variant.status === 'ACTIVE' && i.variant.product.status === 'ACTIVE')
+    .map((i) => {
+      const unitPrice = i.variant.price ?? i.variant.product.price
+      return {
+        id: i.id,
+        productId: i.variant.productId,
+        categoryIds: i.variant.product.categoryId ? [i.variant.product.categoryId] : [],
+        unitPrice,
+        quantity: i.quantity,
+        lineTotal: unitPrice * i.quantity,
+        isDiscounted:
+          i.variant.product.compareAtPrice !== null &&
+          i.variant.product.compareAtPrice > unitPrice,
+      }
+    })
+
+  if (purchasable.length === 0) {
+    throw new ConflictError('Add something to your bag first', 'CART_EMPTY')
+  }
+
+  // Throws a customer-safe ValidationError when the code cannot be used, so an
+  // invalid code never gets saved onto the cart.
+  await evaluateCoupon({
+    code,
+    userId: req.user?.id ?? null,
+    lines: purchasable,
+    subtotal: purchasable.reduce((sum, l) => sum + l.lineTotal, 0),
+  })
+
+  await prisma.cart.update({
+    where: { id: cart.id },
+    data: { couponCode: normalizeCode(code) },
+  })
+
+  return ok(res, {
+    cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }),
+  })
+})
+
+cartRouter.delete('/coupon', async (req, res) => {
+  const cart = await resolveCart(req, res)
+  await prisma.cart.update({ where: { id: cart.id }, data: { couponCode: null } })
+
+  return ok(res, {
+    cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }),
+  })
 })
 
 export { cartInclude }

@@ -60,6 +60,18 @@ model User {
   auditLogs     AuditLog[]
   statusChanges OrderStatusHistory[]
 
+  passwordResets   PasswordResetToken[]
+  consents         Consent[]
+  wishlist         WishlistItem[]
+  reviews          Review[]
+  notifications    Notification[]
+  notificationPrefs NotificationPreference[]
+  returnRequests   ReturnRequest[]
+  couponRedemptions CouponRedemption[]
+  checkoutSessions CheckoutSession[]
+  internalNotes    CustomerNote[]        @relation("CustomerNoteSubject")
+  authoredNotes    CustomerNote[]        @relation("CustomerNoteAuthor")
+
   @@index([role, status])
   @@index([createdAt])
   @@map("users")
@@ -155,12 +167,17 @@ model Category {
   status      CategoryStatus @default(ACTIVE)
   sortOrder   Int            @default(0)
   parentId    String?
+  /// Per-page SEO overrides; fall back to name/description when unset.
+  seoTitle       String?
+  seoDescription String?
+  seoNoindex     Boolean     @default(false)
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
   parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
   children Category[] @relation("CategoryTree")
   products Product[]
+  coupons  CouponCategory[]
 
   @@index([status, sortOrder])
   @@index([parentId])
@@ -169,7 +186,10 @@ model Category {
 
 enum ProductStatus {
   DRAFT
+  /// Publishes automatically once `scheduledFor` passes.
+  SCHEDULED
   ACTIVE
+  INACTIVE
   ARCHIVED
 }
 
@@ -188,12 +208,32 @@ model Product {
   featured         Boolean       @default(false)
   categoryId       String?
   publishedAt      DateTime?
+  /// Set with status=SCHEDULED; a job flips it to ACTIVE when this passes.
+  scheduledFor     DateTime?
+
+  /// Material and care copy the PDP requires (FR-03.1).
+  material         String?
+  careInstructions String?
+
+  /// Per-page SEO overrides; fall back to name/shortDescription when unset.
+  seoTitle       String?
+  seoDescription String?
+  seoNoindex     Boolean @default(false)
+
+  /// Denormalised review aggregates, recomputed when a review is moderated.
+  /// Display only — never used in a money calculation.
+  ratingAverage Float @default(0)
+  ratingCount   Int   @default(0)
+
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
   category Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   variants ProductVariant[]
   images   ProductImage[]
+  reviews  Review[]
+  wishlist WishlistItem[]
+  coupons  CouponProduct[]
 
   @@index([status])
   @@index([categoryId])
@@ -217,6 +257,8 @@ model ProductVariant {
   sku       String        @unique
   /// paise; null means inherit Product.price
   price     Int?
+  /// Shipping weight. Null falls back to the store-wide default in settings.
+  weightGrams Int?
   status    VariantStatus @default(ACTIVE)
   position  Int           @default(0)
   createdAt DateTime      @default(now())
@@ -226,6 +268,9 @@ model ProductVariant {
   inventory  Inventory?
   cartItems  CartItem[]
   orderItems OrderItem[]
+  /// Structured options (Size: M, Colour: Sage) so listings can facet on them.
+  attributes VariantAttributeValue[]
+  wishlist   WishlistItem[]
 
   @@index([productId])
   @@index([status])
@@ -337,6 +382,10 @@ model Cart {
   id        String   @id @default(cuid())
   token     String   @unique
   userId    String?  @unique
+  /// The code the shopper typed, not the discount. The amount is always
+  /// re-derived from the Coupon row, so an edited or expired coupon takes
+  /// effect immediately rather than being frozen into the cart.
+  couponCode String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -394,7 +443,20 @@ model Order {
   shippingAddressSnapshot Json
   billingAddressSnapshot  Json?
 
-  notes     String?
+  /// Coupon applied at checkout. The code is snapshotted so history survives
+  /// the coupon being edited or deleted.
+  couponId   String?
+  couponCode String?
+
+  /// Chosen shipping method, snapshotted for the same reason.
+  shippingMethodId   String?
+  shippingMethodName String?
+
+  /// Customer-facing note left at checkout.
+  notes String?
+  /// Staff-only; never returned on customer endpoints.
+  internalNotes String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -402,6 +464,13 @@ model Order {
   items         OrderItem[]
   statusHistory OrderStatusHistory[]
   payments      Payment[]
+  shipments     Shipment[]
+  returnRequests ReturnRequest[]
+  refunds       Refund[]
+  coupon        Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  redemption    CouponRedemption?
+  shippingMethod ShippingMethod?     @relation(fields: [shippingMethodId], references: [id], onDelete: SetNull)
+  checkoutSession CheckoutSession?
 
   @@index([userId])
   @@index([status])
@@ -424,8 +493,15 @@ model OrderItem {
   quantity            Int
   lineTotal           Int
 
-  order   Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  /// Share of the order discount attributed to this line (FR-13.5). Refunds are
+  /// calculated from lineTotal minus this, so a partial return never gives back
+  /// more than the customer actually paid.
+  discountAllocated Int @default(0)
+
+  order         Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant       ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  shipmentItems ShipmentItem[]
+  returnItems   ReturnItem[]
 
   @@index([orderId])
   @@map("order_items")
@@ -582,4 +658,827 @@ model AuditLog {
   @@index([userId, createdAt])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ============================================================================
+// Attributes — the faceting vocabulary (Size, Colour, Fabric …).
+//
+// Variants own their price and stock; attributes only describe them. Keeping
+// the vocabulary in its own table is what makes storefront filters possible
+// without parsing variant names.
+// ============================================================================
+
+model Attribute {
+  id           String  @id @default(cuid())
+  name         String  @unique
+  slug         String  @unique
+  /// Rendered as swatches when true (colour), as chips otherwise (size).
+  isSwatch     Boolean @default(false)
+  /// Exposed as a storefront filter.
+  isFilterable Boolean @default(true)
+  position     Int     @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  values AttributeValue[]
+
+  @@index([position])
+  @@map("attributes")
+}
+
+model AttributeValue {
+  id          String  @id @default(cuid())
+  attributeId String
+  value       String
+  slug        String
+  /// Hex for swatches, e.g. "#838E5E". Ignored for non-swatch attributes.
+  colorHex    String?
+  position    Int     @default(0)
+
+  attribute Attribute               @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variants  VariantAttributeValue[]
+
+  @@unique([attributeId, slug])
+  @@index([attributeId, position])
+  @@map("attribute_values")
+}
+
+/// Join between a variant and the attribute values that define it.
+model VariantAttributeValue {
+  variantId        String
+  attributeValueId String
+
+  variant        ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attributeValue AttributeValue @relation(fields: [attributeValueId], references: [id], onDelete: Cascade)
+
+  @@id([variantId, attributeValueId])
+  @@index([attributeValueId])
+  @@map("variant_attribute_values")
+}
+
+// ============================================================================
+// Coupons (M13)
+//
+// A coupon's value is never trusted from the client. The cart sends a code;
+// the server re-derives the discount from this row every time, so editing a
+// coupon changes future carts but never rewrites placed orders — those keep
+// Order.couponCode and the already-computed amounts.
+// ============================================================================
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+  FREE_SHIPPING
+}
+
+enum CouponStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  EXPIRED
+}
+
+model Coupon {
+  id          String       @id @default(cuid())
+  /// Compared case-insensitively at redemption; stored upper-case.
+  code        String       @unique
+  description String?
+  type        DiscountType
+  status      CouponStatus @default(DRAFT)
+
+  /// Basis points for PERCENTAGE (1000 = 10%), paise for FIXED, ignored for
+  /// FREE_SHIPPING. One integer field — no floats anywhere in money maths.
+  value Int
+
+  /// Caps a percentage discount, in paise. Null = uncapped.
+  maxDiscount Int?
+  /// Cart subtotal required before the coupon applies, in paise.
+  minSubtotal Int  @default(0)
+
+  startsAt DateTime?
+  endsAt   DateTime?
+
+  /// Null = unlimited. usageCount is incremented inside the order transaction,
+  /// so two simultaneous checkouts cannot both take the last one.
+  usageLimit        Int?
+  usageCount        Int     @default(0)
+  perUserLimit      Int?
+  /// Only orders from customers who have never ordered before.
+  firstOrderOnly    Boolean @default(false)
+  /// Excludes products already discounted (price < compareAtPrice).
+  excludeDiscounted Boolean @default(false)
+  /// Not shown in listings; applies only when typed in.
+  isPublic          Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products    CouponProduct[]
+  categories  CouponCategory[]
+  redemptions CouponRedemption[]
+  orders      Order[]
+
+  @@index([status])
+  @@index([endsAt])
+  @@map("coupons")
+}
+
+/// Restricts a coupon to specific products. No rows = applies to everything.
+model CouponProduct {
+  couponId  String
+  productId String
+
+  coupon  Coupon  @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([couponId, productId])
+  @@index([productId])
+  @@map("coupon_products")
+}
+
+/// Restricts a coupon to specific categories. No rows = applies to everything.
+model CouponCategory {
+  couponId   String
+  categoryId String
+
+  coupon   Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([couponId, categoryId])
+  @@index([categoryId])
+  @@map("coupon_categories")
+}
+
+/// One row per successful redemption. orderId is unique so a retried checkout
+/// can never double-count, and per-user limits are a count over this table.
+model CouponRedemption {
+  id        String   @id @default(cuid())
+  couponId  String
+  userId    String
+  orderId   String   @unique
+  /// Paise actually taken off, after caps.
+  amount    Int
+  createdAt DateTime @default(now())
+
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([couponId, userId])
+  @@map("coupon_redemptions")
+}
+
+// ============================================================================
+// Shipping (M21)
+// ============================================================================
+
+model ShippingZone {
+  id        String   @id @default(cuid())
+  name      String
+  /// ISO-3166-1 alpha-2, e.g. ["IN"].
+  countries String[]
+  /// Indian state names or PIN prefixes. Empty = the whole country.
+  regions   String[]
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  methods ShippingMethod[]
+
+  @@index([isActive, position])
+  @@map("shipping_zones")
+}
+
+model ShippingMethod {
+  id          String  @id @default(cuid())
+  zoneId      String
+  name        String
+  description String?
+
+  /// Flat rate in paise. Free shipping is simply 0.
+  rate        Int  @default(0)
+  /// Cart subtotal at or above which this method costs nothing. Null = never.
+  freeAbove   Int?
+  /// Order subtotal bounds for this method to be offered at all, in paise.
+  minSubtotal Int?
+  maxSubtotal Int?
+  /// Shown to the customer as "3–5 business days".
+  minDays     Int?
+  maxDays     Int?
+  /// Cash on delivery is a shipping method with an extra fee attached.
+  isCod       Boolean @default(false)
+  codFee      Int     @default(0)
+
+  isActive  Boolean  @default(true)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  zone   ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([zoneId, isActive, position])
+  @@map("shipping_methods")
+}
+
+// ============================================================================
+// Fulfilment (M09)
+//
+// One order can ship in several parcels, so shipments hold their own item rows
+// rather than reusing the order lines.
+// ============================================================================
+
+enum ShipmentStatus {
+  PENDING
+  READY_TO_SHIP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  RETURNED_TO_ORIGIN
+  CANCELLED
+}
+
+model Shipment {
+  id             String         @id @default(cuid())
+  orderId        String
+  /// Human-facing, e.g. "PK-1042-S1".
+  shipmentNumber String         @unique
+  status         ShipmentStatus @default(PENDING)
+
+  carrier        String?
+  trackingNumber String?
+  /// Full URL the customer can open, built from the carrier's template.
+  trackingUrl    String?
+
+  /// Grams. Used for carrier manifests.
+  weightGrams Int?
+
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+  estimatedAt DateTime?
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order  Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items  ShipmentItem[]
+  events ShipmentEvent[]
+
+  @@index([orderId])
+  @@index([status])
+  @@index([trackingNumber])
+  @@map("shipments")
+}
+
+model ShipmentItem {
+  id          String @id @default(cuid())
+  shipmentId  String
+  orderItemId String
+  quantity    Int
+
+  shipment  Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([shipmentId, orderItemId])
+  @@index([orderItemId])
+  @@map("shipment_items")
+}
+
+/// Append-only tracking trail. Carrier webhooks write here; nothing edits it.
+model ShipmentEvent {
+  id         String         @id @default(cuid())
+  shipmentId String
+  status     ShipmentStatus
+  message    String?
+  location   String?
+  occurredAt DateTime       @default(now())
+  createdAt  DateTime       @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([shipmentId, occurredAt])
+  @@map("shipment_events")
+}
+
+// ============================================================================
+// Returns and refunds (M22)
+// ============================================================================
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  IN_TRANSIT
+  RECEIVED
+  INSPECTED
+  COMPLETED
+  CANCELLED
+}
+
+enum ReturnResolution {
+  REFUND
+  EXCHANGE
+  STORE_CREDIT
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model ReturnRequest {
+  id           String @id @default(cuid())
+  returnNumber String @unique
+  orderId      String
+  userId       String
+
+  status     ReturnStatus     @default(REQUESTED)
+  resolution ReturnResolution @default(REFUND)
+
+  /// Chosen from a fixed list in the UI; free text goes in comment.
+  reason  String
+  comment String?
+  /// Customer-uploaded evidence — storage keys, not raw files.
+  images  String[]
+
+  /// Staff-only.
+  internalNotes   String?
+  /// Shown to the customer when status is REJECTED.
+  rejectionReason String?
+
+  /// Return shipping, when the customer sends it back themselves.
+  carrier        String?
+  trackingNumber String?
+
+  requestedAt DateTime  @default(now())
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  order         Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items         ReturnItem[]
+  statusHistory ReturnStatusHistory[]
+  refunds       Refund[]
+
+  @@index([orderId])
+  @@index([userId])
+  @@index([status])
+  @@map("return_requests")
+}
+
+model ReturnItem {
+  id              String @id @default(cuid())
+  returnRequestId String
+  orderItemId     String
+  quantity        Int
+
+  /// Set after inspection; drives whether stock goes back on the shelf.
+  restock   Boolean @default(false)
+  condition String?
+
+  /// Paise this line is worth back: unitPrice × qty minus its share of the
+  /// order discount. Frozen at approval so later price edits cannot change it.
+  refundableAmount Int @default(0)
+
+  returnRequest ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+  orderItem     OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([returnRequestId, orderItemId])
+  @@index([orderItemId])
+  @@map("return_items")
+}
+
+model ReturnStatusHistory {
+  id              String       @id @default(cuid())
+  returnRequestId String
+  status          ReturnStatus
+  note            String?
+  changedById     String?
+  createdAt       DateTime     @default(now())
+
+  returnRequest ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([returnRequestId, createdAt])
+  @@map("return_status_history")
+}
+
+/// A refund is money leaving, so it is recorded independently of the return
+/// that caused it — admins can also refund an order outright.
+model Refund {
+  id              String  @id @default(cuid())
+  orderId         String
+  returnRequestId String?
+  /// The gateway refund id, e.g. Razorpay's rfnd_… . Unique so a retried
+  /// webhook cannot record the same refund twice.
+  providerRefundId String? @unique
+  provider         String
+
+  amount   Int
+  currency String       @default("INR")
+  status   RefundStatus @default(PENDING)
+  reason   String?
+  /// Gateway response, secrets stripped.
+  rawPayload Json?
+
+  initiatedById String?
+  processedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  returnRequest ReturnRequest? @relation(fields: [returnRequestId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([status])
+  @@map("refunds")
+}
+
+// ============================================================================
+// Wishlist (M18) and reviews (M17)
+// ============================================================================
+
+model WishlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  /// Optional: wishing for a specific size/colour rather than the product.
+  variantId String?
+  createdAt DateTime @default(now())
+
+  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId, variantId])
+  @@index([userId, createdAt])
+  @@index([productId])
+  @@map("wishlist_items")
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  FLAGGED
+}
+
+model Review {
+  id        String @id @default(cuid())
+  productId String
+  userId    String
+
+  /// 1–5, validated at the service layer.
+  rating Int
+  title  String?
+  body   String?
+  images String[]
+
+  status             ReviewStatus @default(PENDING)
+  /// True when the reviewer has a DELIVERED order containing this product.
+  isVerifiedPurchase Boolean      @default(false)
+
+  /// Public reply from the brand.
+  adminResponse    String?
+  adminRespondedAt DateTime?
+  moderatedById    String?
+  moderatedAt      DateTime?
+  rejectionReason  String?
+
+  helpfulCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One review per customer per product; editing replaces it.
+  @@unique([productId, userId])
+  @@index([productId, status, createdAt])
+  @@index([status])
+  @@map("reviews")
+}
+
+// ============================================================================
+// Notifications (M16) and outbound messaging (M14, M15)
+// ============================================================================
+
+enum NotificationSeverity {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+/// In-app bell. userId null = broadcast to all admins (low stock, new order).
+model Notification {
+  id       String               @id @default(cuid())
+  userId   String?
+  /// Routing key, e.g. "order.placed", "inventory.low_stock".
+  type     String
+  title    String
+  body     String?
+  severity NotificationSeverity @default(INFO)
+  /// Where clicking it goes, e.g. "/admin/orders/abc".
+  link     String?
+  /// Free-form context; never secrets.
+  data     Json?
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@index([type])
+  @@map("notifications")
+}
+
+enum MessageChannel {
+  EMAIL
+  WHATSAPP
+  SMS
+  IN_APP
+}
+
+model NotificationPreference {
+  id      String         @id @default(cuid())
+  userId  String
+  channel MessageChannel
+  /// Same routing key as Notification.type, or "*" for the whole channel.
+  type    String
+  enabled Boolean        @default(true)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channel, type])
+  @@map("notification_preferences")
+}
+
+/// Editable templates so copy changes do not need a deploy. {{variables}} are
+/// substituted server-side; the allowed set is per-template.
+model MessageTemplate {
+  id      String         @id @default(cuid())
+  key     String
+  channel MessageChannel
+  name    String
+  /// Email only.
+  subject String?
+  body    String
+  /// Provider-approved template name for WhatsApp/SMS.
+  providerTemplateId String?
+  /// Documents the placeholders this template accepts.
+  variables String[]
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs MessageLog[]
+
+  @@unique([key, channel])
+  @@map("message_templates")
+}
+
+enum MessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  BOUNCED
+}
+
+/// Delivery log. Recipients are stored because an order confirmation may go to
+/// an address the customer later changes. Never store credentials here.
+model MessageLog {
+  id         String         @id @default(cuid())
+  templateId String?
+  channel    MessageChannel
+  /// Email address or E.164 phone number.
+  recipient  String
+  subject    String?
+  status     MessageStatus  @default(QUEUED)
+
+  /// Ties a message back to what triggered it, e.g. ("order", "<id>").
+  entityType String?
+  entityId   String?
+
+  provider          String?
+  providerMessageId String?
+  error             String?
+  attempts          Int     @default(0)
+
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  template MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([entityType, entityId])
+  @@index([recipient])
+  @@map("message_logs")
+}
+
+// ============================================================================
+// CMS pages and redirects (M23, M25)
+// ============================================================================
+
+enum PageStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+}
+
+model Page {
+  id     String     @id @default(cuid())
+  slug   String     @unique
+  title  String
+  status PageStatus @default(DRAFT)
+
+  /// Same block array shape the homepage sections already use, so the existing
+  /// renderer works unchanged.
+  blocks Json @default("[]")
+
+  seoTitle       String?
+  seoDescription String?
+  seoNoindex     Boolean @default(false)
+  ogImage        String?
+
+  /// System pages (about, contact, policies) cannot be deleted from admin.
+  isSystem Boolean @default(false)
+
+  publishedAt  DateTime?
+  scheduledFor DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  revisions PageRevision[]
+
+  @@index([status])
+  @@map("pages")
+}
+
+/// Immutable snapshot taken before each save, so admins can roll back.
+model PageRevision {
+  id      String @id @default(cuid())
+  pageId  String
+  /// Monotonic per page.
+  version Int
+  title   String
+  blocks  Json
+  /// Null when the revision was created by a system process.
+  createdById String?
+  note        String?
+  createdAt   DateTime @default(now())
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, version])
+  @@index([pageId, createdAt])
+  @@map("page_revisions")
+}
+
+/// URL redirects, so renaming a product slug does not strand inbound links.
+model Redirect {
+  id       String @id @default(cuid())
+  /// Path only, leading slash, no host: "/old-product".
+  fromPath String @unique
+  toPath   String
+  /// 301 or 302.
+  statusCode Int       @default(301)
+  isActive   Boolean   @default(true)
+  hitCount   Int       @default(0)
+  lastHitAt  DateTime?
+  note       String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([isActive])
+  @@map("redirects")
+}
+
+// ============================================================================
+// Compliance, checkout recovery, account security, CRM
+// ============================================================================
+
+/// Consent records for cookies, marketing and terms (DPDP Act). Append-only:
+/// withdrawing consent writes a new row with granted = false, so the history of
+/// what was agreed and when survives.
+model Consent {
+  id          String  @id @default(cuid())
+  userId      String?
+  /// Ties pre-login consent to a browser.
+  anonymousId String?
+  /// "cookies.analytics", "marketing.email", "terms", "privacy".
+  type    String
+  granted Boolean
+  /// Policy version the customer agreed to.
+  version String?
+
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type, createdAt])
+  @@index([anonymousId, type])
+  @@map("consents")
+}
+
+/// One row per checkout attempt. The client sends an idempotency key; a repeat
+/// submit finds this row and returns the same order instead of charging twice.
+model CheckoutSession {
+  id             String  @id @default(cuid())
+  idempotencyKey String  @unique
+  userId         String
+  cartId         String?
+  /// Set once the order exists; unique so one session can only ever make one.
+  orderId        String? @unique
+
+  /// The request that created it, for debugging mismatched retries.
+  payload Json?
+  /// Terminal states are "completed" and "failed".
+  status  String  @default("started")
+  error   String?
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("checkout_sessions")
+}
+
+/// Password reset. Only the SHA-256 of the token is stored, so a database leak
+/// does not hand out working reset links — same rule as refresh tokens.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  ip        String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// Staff-only notes on a customer record. Never returned on any customer-facing
+/// endpoint.
+model CustomerNote {
+  id       String  @id @default(cuid())
+  userId   String
+  authorId String?
+  body     String
+  /// Sticks to the top of the customer page.
+  isPinned Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User  @relation("CustomerNoteSubject", fields: [userId], references: [id], onDelete: Cascade)
+  author User? @relation("CustomerNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("customer_notes")
+}
+
+/// First-party analytics (product views, searches, add-to-cart). Deliberately
+/// denormalised and index-light: written on nearly every request, read only by
+/// scheduled report queries.
+model AnalyticsEvent {
+  id          String  @id @default(cuid())
+  /// "product.view", "search", "cart.add", "checkout.start".
+  type        String
+  userId      String?
+  anonymousId String?
+  sessionId   String?
+  entityType  String?
+  entityId    String?
+  /// Search terms, referrer, UTM parameters. No PII.
+  properties  Json?
+  createdAt   DateTime @default(now())
+
+  @@index([type, createdAt])
+  @@index([entityType, entityId, createdAt])
+  @@map("analytics_events")
 }

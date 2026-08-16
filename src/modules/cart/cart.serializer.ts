@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../../config/db.js'
 import { discountPercent } from '../../utils/money.js'
+import { tryEvaluateCoupon, type DiscountableLine } from '../coupons/coupon.service.js'
 
 /**
  * Cart pricing (spec §22, §23).
@@ -8,6 +9,10 @@ import { discountPercent } from '../../utils/money.js'
  * Every figure here is read from the database at read time. Nothing about price
  * or availability is ever taken from the client — the request only ever says
  * *which* variant and *how many*.
+ *
+ * The applied coupon is re-evaluated on every read for the same reason: a code
+ * that expired, ran out, or stopped matching the bag must stop discounting the
+ * moment that happens, not at checkout.
  */
 export const cartInclude = {
   items: {
@@ -33,7 +38,12 @@ export interface CartIssue {
   message: string
 }
 
-export function serializeCart(cart: CartRow) {
+export interface SerializeOptions {
+  /** Needed for per-customer coupon rules; null for a guest cart. */
+  userId?: string | null
+}
+
+export async function serializeCart(cart: CartRow, options: SerializeOptions = {}) {
   const issues: CartIssue[] = []
 
   const items = cart.items.map((item) => {
@@ -74,6 +84,7 @@ export function serializeCart(cart: CartRow) {
       id: item.id,
       variantId: variant.id,
       productId: product.id,
+      categoryId: product.categoryId,
       quantity: item.quantity,
       unitPrice,
       lineTotal: unitPrice * item.quantity,
@@ -94,19 +105,101 @@ export function serializeCart(cart: CartRow) {
   const purchasable = items.filter((i) => i.purchasable)
   const subtotal = purchasable.reduce((sum, i) => sum + i.lineTotal, 0)
 
+  const coupon = await resolveCartCoupon(cart, purchasable, subtotal, options.userId ?? null)
+
   return {
     id: cart.id,
     token: cart.token,
-    items,
+    items: items.map((i) => ({ ...i, discountAllocated: coupon.allocation[i.id] ?? 0 })),
     itemCount: items.reduce((sum, i) => sum + i.quantity, 0),
     subtotal,
+    discount: coupon.discount,
+    /** What the customer pays for the goods themselves, before shipping and tax. */
+    discountedSubtotal: subtotal - coupon.discount,
+    coupon: coupon.summary,
+    /** True when the applied coupon waives the delivery charge. */
+    freeShipping: coupon.freeShipping,
     issues,
     /** Checkout is only allowed when there is something valid to buy. */
     checkoutReady: items.length > 0 && issues.length === 0,
   }
 }
 
-export type SerializedCart = ReturnType<typeof serializeCart>
+/** Shape returned to the client — never the whole coupon row. */
+export interface CartCouponSummary {
+  code: string
+  description: string | null
+  type: string
+  amount: number
+  freeShipping: boolean
+}
+
+/**
+ * Turns the code saved on the cart into money, or into a reason it no longer
+ * applies. A code that has become invalid is dropped from the cart so the
+ * customer is told once rather than on every page load.
+ */
+async function resolveCartCoupon(
+  cart: CartRow,
+  lines: Array<{ id: string; productId: string; categoryId: string | null; unitPrice: number; quantity: number; lineTotal: number; compareAtPrice: number | null }>,
+  subtotal: number,
+  userId: string | null,
+): Promise<{
+  discount: number
+  allocation: Record<string, number>
+  freeShipping: boolean
+  summary: (CartCouponSummary & { error?: string }) | null
+}> {
+  const empty = { discount: 0, allocation: {}, freeShipping: false, summary: null }
+  if (!cart.couponCode || lines.length === 0) return empty
+
+  const discountable: DiscountableLine[] = lines.map((l) => ({
+    id: l.id,
+    productId: l.productId,
+    categoryIds: l.categoryId ? [l.categoryId] : [],
+    unitPrice: l.unitPrice,
+    quantity: l.quantity,
+    lineTotal: l.lineTotal,
+    isDiscounted: l.compareAtPrice !== null && l.compareAtPrice > l.unitPrice,
+  }))
+
+  const { evaluation, error } = await tryEvaluateCoupon({
+    code: cart.couponCode,
+    userId,
+    lines: discountable,
+    subtotal,
+  })
+
+  if (!evaluation) {
+    await prisma.cart.update({ where: { id: cart.id }, data: { couponCode: null } })
+    return {
+      ...empty,
+      summary: {
+        code: cart.couponCode,
+        description: null,
+        type: 'INVALID',
+        amount: 0,
+        freeShipping: false,
+        error: error?.message ?? 'That code is no longer valid',
+      },
+    }
+  }
+
+  return {
+    discount: evaluation.discount,
+    allocation: evaluation.allocation,
+    freeShipping: evaluation.freeShipping,
+    summary: {
+      code: evaluation.coupon.code,
+      description: evaluation.coupon.description,
+      type: evaluation.coupon.type,
+      amount: evaluation.discount,
+      freeShipping: evaluation.freeShipping,
+    },
+  }
+}
+
+export type SerializedCart = Awaited<ReturnType<typeof serializeCart>>
 
 export async function loadCart(cartId: string): Promise<CartRow> {
   return prisma.cart.findUniqueOrThrow({ where: { id: cartId }, include: cartInclude })

@@ -1,0 +1,343 @@
+import { Router } from 'express'
+import { z } from 'zod'
+import type { Prisma } from '@prisma/client'
+import { prisma } from '../../config/db.js'
+import { validate } from '../../middleware/validate.js'
+import { requireAuth, requirePermission } from '../../middleware/auth.js'
+import { writeLimiter } from '../../middleware/rate-limit.js'
+import { created, ok, pageMeta } from '../../utils/response.js'
+import { ConflictError, NotFoundError } from '../../utils/errors.js'
+import { recordAudit } from '../../utils/audit.js'
+import { maskContact } from '../../utils/pii.js'
+import {
+  RETURN_REASONS,
+  createReturnRequest,
+  returnDetailInclude,
+  returnableItems,
+  transitionReturn,
+} from './return.service.js'
+import { createRefund, refundableAmount } from './refund.service.js'
+
+const RETURN_STATUSES = [
+  'REQUESTED',
+  'APPROVED',
+  'REJECTED',
+  'IN_TRANSIT',
+  'RECEIVED',
+  'INSPECTED',
+  'COMPLETED',
+  'CANCELLED',
+] as const
+
+/**
+ * Customer-facing returns (M22). Everything is scoped to the signed-in user's
+ * own orders — an id belonging to somebody else 404s rather than 403s.
+ */
+export const returnRouter: Router = Router()
+
+returnRouter.use(requireAuth)
+
+/** What the "Return an item" screen needs to render, including why it can't. */
+returnRouter.get('/eligibility/:orderId', async (req, res) => {
+  const { orderId } = req.params as { orderId: string }
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, userId: req.user!.id },
+    select: { id: true, orderNumber: true, status: true },
+  })
+  if (!order) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
+
+  return ok(res, { order, ...(await returnableItems(orderId)) })
+})
+
+const createSchema = z.object({
+  orderId: z.string().trim().min(1),
+  reason: z.enum(RETURN_REASONS),
+  comment: z.string().trim().max(1000).optional(),
+  /** Storage keys from the media upload endpoint, never raw data. */
+  images: z.array(z.string().trim().max(500)).max(6).default([]),
+  resolution: z.enum(['REFUND', 'EXCHANGE', 'STORE_CREDIT']).default('REFUND'),
+  items: z
+    .array(
+      z.object({
+        orderItemId: z.string().trim().min(1),
+        quantity: z.coerce.number().int().min(1),
+      }),
+    )
+    .min(1, 'Choose at least one item to return')
+    .max(100),
+})
+
+returnRouter.post('/', writeLimiter, validate({ body: createSchema }), async (req, res) => {
+  const input = req.validated!.body as z.infer<typeof createSchema>
+
+  const { request, refundable } = await createReturnRequest({
+    orderId: input.orderId,
+    userId: req.user!.id,
+    reason: input.reason,
+    comment: input.comment,
+    images: input.images,
+    resolution: input.resolution,
+    items: input.items,
+  })
+
+  recordAudit({
+    action: 'RETURN_REQUESTED',
+    entityType: 'ReturnRequest',
+    entityId: request.id,
+    metadata: { orderId: input.orderId, refundable },
+    req,
+  })
+
+  return created(res, { request: forCustomer(request), estimatedRefund: refundable })
+})
+
+returnRouter.get('/', async (req, res) => {
+  const requests = await prisma.returnRequest.findMany({
+    where: { userId: req.user!.id },
+    orderBy: { createdAt: 'desc' },
+    include: returnDetailInclude,
+  })
+  return ok(res, { requests: requests.map(forCustomer) })
+})
+
+returnRouter.get('/:id', async (req, res) => {
+  const { id } = req.params as { id: string }
+
+  const request = await prisma.returnRequest.findFirst({
+    where: { id, userId: req.user!.id },
+    include: returnDetailInclude,
+  })
+  if (!request) throw new NotFoundError('Return request', 'RETURN_NOT_FOUND')
+
+  return ok(res, { request: forCustomer(request) })
+})
+
+/** A customer may withdraw a request, but only before it has been decided. */
+returnRouter.post('/:id/cancel', writeLimiter, async (req, res) => {
+  const { id } = req.params as { id: string }
+
+  const existing = await prisma.returnRequest.findFirst({
+    where: { id, userId: req.user!.id },
+    select: { id: true, status: true },
+  })
+  if (!existing) throw new NotFoundError('Return request', 'RETURN_NOT_FOUND')
+
+  if (existing.status !== 'REQUESTED' && existing.status !== 'APPROVED') {
+    throw new ConflictError('That return can no longer be cancelled', 'RETURN_NOT_CANCELLABLE')
+  }
+
+  const request = await transitionReturn({
+    returnRequestId: id,
+    status: 'CANCELLED',
+    note: 'Cancelled by the customer',
+    actorId: req.user!.id,
+  })
+
+  return ok(res, { request: forCustomer(request) })
+})
+
+/** Staff-only fields must not travel with a customer response. */
+function forCustomer<T extends { internalNotes?: string | null }>(request: T) {
+  const { internalNotes: _staffOnly, ...rest } = request
+  return rest
+}
+
+// ------------------------------------------------------------------- admin
+
+export const adminReturnRouter: Router = Router()
+
+const listQuery = z.object({
+  q: z.string().trim().max(120).optional(),
+  status: z.enum(RETURN_STATUSES).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  perPage: z.coerce.number().int().min(1).max(100).default(25),
+})
+
+adminReturnRouter.get(
+  '/',
+  requirePermission('return.read'),
+  validate({ query: listQuery }),
+  async (req, res) => {
+    const q = req.validated!.query as z.infer<typeof listQuery>
+
+    const where: Prisma.ReturnRequestWhereInput = {
+      ...(q.status ? { status: q.status } : {}),
+      ...(q.q
+        ? {
+            OR: [
+              { returnNumber: { contains: q.q, mode: 'insensitive' } },
+              { order: { orderNumber: { contains: q.q, mode: 'insensitive' } } },
+              { user: { email: { contains: q.q, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    }
+
+    const [total, requests] = await Promise.all([
+      prisma.returnRequest.count({ where }),
+      prisma.returnRequest.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (q.page - 1) * q.perPage,
+        take: q.perPage,
+        include: {
+          order: { select: { id: true, orderNumber: true, total: true } },
+          user: { select: { id: true, name: true, email: true } },
+          _count: { select: { items: true } },
+        },
+      }),
+    ])
+
+    return ok(
+      res,
+      {
+        requests: requests.map((r) => ({
+          id: r.id,
+          returnNumber: r.returnNumber,
+          status: r.status,
+          resolution: r.resolution,
+          reason: r.reason,
+          itemCount: r._count.items,
+          order: r.order,
+          customer: maskContact(r.user, req.user?.permissions),
+          requestedAt: r.requestedAt,
+        })),
+      },
+      { pagination: pageMeta(q.page, q.perPage, total) },
+    )
+  },
+)
+
+adminReturnRouter.get('/:id', requirePermission('return.read'), async (req, res) => {
+  const { id } = req.params as { id: string }
+
+  const request = await prisma.returnRequest.findUnique({
+    where: { id },
+    include: {
+      ...returnDetailInclude,
+      user: { select: { id: true, name: true, email: true, phone: true } },
+    },
+  })
+  if (!request) throw new NotFoundError('Return request', 'RETURN_NOT_FOUND')
+
+  const money = await refundableAmount(request.orderId)
+
+  return ok(res, {
+    request: { ...request, user: maskContact(request.user, req.user?.permissions) },
+    refundable: money,
+  })
+})
+
+const transitionSchema = z.object({
+  status: z.enum(RETURN_STATUSES),
+  note: z.string().trim().max(500).optional().nullable(),
+  rejectionReason: z.string().trim().max(500).optional().nullable(),
+  itemDispositions: z
+    .array(
+      z.object({
+        returnItemId: z.string().trim().min(1),
+        restock: z.boolean(),
+        condition: z.string().trim().max(200).optional().nullable(),
+      }),
+    )
+    .max(100)
+    .optional(),
+})
+
+adminReturnRouter.patch(
+  '/:id/status',
+  writeLimiter,
+  requirePermission('return.manage'),
+  validate({ body: transitionSchema }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const body = req.validated!.body as z.infer<typeof transitionSchema>
+
+    const request = await transitionReturn({
+      returnRequestId: id,
+      status: body.status,
+      note: body.note,
+      rejectionReason: body.rejectionReason,
+      itemDispositions: body.itemDispositions,
+      actorId: req.user!.id,
+    })
+
+    recordAudit({
+      action: 'RETURN_STATUS_CHANGED',
+      entityType: 'ReturnRequest',
+      entityId: id,
+      metadata: { status: body.status },
+      req,
+    })
+
+    return ok(res, { request })
+  },
+)
+
+const notesSchema = z.object({ internalNotes: z.string().trim().max(4000) })
+
+adminReturnRouter.patch(
+  '/:id/internal-notes',
+  writeLimiter,
+  requirePermission('return.manage'),
+  validate({ body: notesSchema }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const { internalNotes } = req.validated!.body as z.infer<typeof notesSchema>
+
+    const existing = await prisma.returnRequest.findUnique({ where: { id }, select: { id: true } })
+    if (!existing) throw new NotFoundError('Return request', 'RETURN_NOT_FOUND')
+
+    const request = await prisma.returnRequest.update({
+      where: { id },
+      data: { internalNotes: internalNotes || null },
+      include: returnDetailInclude,
+    })
+
+    return ok(res, { request })
+  },
+)
+
+// ------------------------------------------------------------------ refunds
+
+export const adminRefundRouter: Router = Router()
+
+adminRefundRouter.get('/orders/:orderId', requirePermission('order.read'), async (req, res) => {
+  const { orderId } = req.params as { orderId: string }
+
+  const [money, refunds] = await Promise.all([
+    refundableAmount(orderId),
+    prisma.refund.findMany({ where: { orderId }, orderBy: { createdAt: 'desc' } }),
+  ])
+
+  return ok(res, { ...money, refunds })
+})
+
+const refundSchema = z.object({
+  orderId: z.string().trim().min(1),
+  /** integer paise */
+  amount: z.coerce.number().int().min(1),
+  reason: z.string().trim().max(300).optional(),
+  returnRequestId: z.string().trim().min(1).optional(),
+})
+
+adminRefundRouter.post(
+  '/',
+  writeLimiter,
+  requirePermission('refund.create'),
+  validate({ body: refundSchema }),
+  async (req, res) => {
+    const body = req.validated!.body as z.infer<typeof refundSchema>
+
+    const refund = await createRefund({
+      orderId: body.orderId,
+      amount: body.amount,
+      reason: body.reason,
+      returnRequestId: body.returnRequestId,
+      actorId: req.user!.id,
+    })
+
+    return created(res, { refund, ...(await refundableAmount(body.orderId)) })
+  },
+)

@@ -8,7 +8,9 @@ import { created, ok, pageMeta } from '../../utils/response.js'
 import { NotFoundError } from '../../utils/errors.js'
 import { recordAudit } from '../../utils/audit.js'
 import { emit } from '../../events/bus.js'
-import { createOrder, orderDetailInclude, updateOrderStatus } from './order.service.js'
+import { createOrderIdempotent, orderDetailInclude, updateOrderStatus } from './order.service.js'
+import { forAdmin, forCustomer } from './order.serializer.js'
+import { maskContact } from '../../utils/pii.js'
 
 /** Customer-facing orders. Every read is scoped to the session's user. */
 export const orderRouter: Router = Router()
@@ -18,6 +20,13 @@ orderRouter.use(requireAuth)
 const createSchema = z.object({
   addressId: z.string().trim().min(1),
   notes: z.string().trim().max(500).optional(),
+  /**
+   * Client-generated, one per checkout attempt. Optional so existing callers
+   * keep working, but the storefront always sends it — see the service.
+   */
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+  /** Chosen from GET /shipping/quote. Re-validated server-side. */
+  shippingMethodId: z.string().trim().min(1).optional(),
 })
 
 const listQuery = z.object({
@@ -28,32 +37,38 @@ const listQuery = z.object({
 orderRouter.post('/', writeLimiter, validate({ body: createSchema }), async (req, res) => {
   const input = req.validated!.body as z.infer<typeof createSchema>
 
-  const order = await createOrder({
+  const { order, replayed } = await createOrderIdempotent({
     userId: req.user!.id,
     addressId: input.addressId,
     notes: input.notes,
+    idempotencyKey: input.idempotencyKey,
+    shippingMethodId: input.shippingMethodId,
   })
 
-  recordAudit({
-    action: 'ORDER_CREATED',
-    entityType: 'Order',
-    entityId: order.id,
-    metadata: { orderNumber: order.orderNumber, total: order.total },
-    req,
-  })
-  emit('ORDER_CREATED', {
-    orderId: order.id,
-    orderNumber: order.orderNumber,
-    userId: req.user!.id,
-    total: order.total,
-  })
+  // A replay is the same order coming back, not a new one — auditing and
+  // emailing again would double-count revenue and spam the customer.
+  if (!replayed) {
+    recordAudit({
+      action: 'ORDER_CREATED',
+      entityType: 'Order',
+      entityId: order.id,
+      metadata: { orderNumber: order.orderNumber, total: order.total },
+      req,
+    })
+    emit('ORDER_CREATED', {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      userId: req.user!.id,
+      total: order.total,
+    })
+  }
 
   const full = await prisma.order.findUniqueOrThrow({
     where: { id: order.id },
     include: orderDetailInclude,
   })
 
-  return created(res, { order: full })
+  return created(res, { order: forCustomer(full), replayed })
 })
 
 orderRouter.get('/', validate({ query: listQuery }), async (req, res) => {
@@ -99,7 +114,7 @@ orderRouter.get('/:id', async (req, res) => {
   })
   if (!order) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
 
-  return ok(res, { order })
+  return ok(res, { order: forCustomer(order) })
 })
 
 // ---------------------------------------------------------------- admin
@@ -156,7 +171,7 @@ adminOrderRouter.get(
           status: o.status,
           total: o.total,
           itemCount: o._count.items,
-          customer: o.user,
+          customer: maskContact(o.user, req.user?.permissions),
           createdAt: o.createdAt,
         })),
       },
@@ -169,8 +184,35 @@ adminOrderRouter.get('/:id', requirePermission('order.read'), async (req, res) =
   const { id } = req.params as { id: string }
   const order = await prisma.order.findUnique({ where: { id }, include: orderDetailInclude })
   if (!order) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
-  return ok(res, { order })
+  return ok(res, { order: forAdmin(order, req.user?.permissions) })
 })
+
+const internalNotesSchema = z.object({ internalNotes: z.string().trim().max(4000) })
+
+/**
+ * Staff-only note on an order (FR-9.6). Kept separate from `notes`, which is
+ * the customer's own message and must stay editable only by them.
+ */
+adminOrderRouter.patch(
+  '/:id/internal-notes',
+  writeLimiter,
+  requirePermission('order.update'),
+  validate({ body: internalNotesSchema }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const { internalNotes } = req.validated!.body as z.infer<typeof internalNotesSchema>
+
+    const exists = await prisma.order.findUnique({ where: { id }, select: { id: true } })
+    if (!exists) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
+
+    await prisma.order.update({ where: { id }, data: { internalNotes: internalNotes || null } })
+
+    recordAudit({ action: 'ORDER_NOTE_UPDATED', entityType: 'Order', entityId: id, req })
+
+    const order = await prisma.order.findUniqueOrThrow({ where: { id }, include: orderDetailInclude })
+    return ok(res, { order: forAdmin(order, req.user?.permissions) })
+  },
+)
 
 const statusSchema = z.object({
   status: z.enum(['PENDING_PAYMENT', 'PAID', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
@@ -189,6 +231,6 @@ adminOrderRouter.patch(
     await updateOrderStatus(id, status, req.user!.id, note)
 
     const order = await prisma.order.findUniqueOrThrow({ where: { id }, include: orderDetailInclude })
-    return ok(res, { order })
+    return ok(res, { order: forAdmin(order, req.user?.permissions) })
   },
 )

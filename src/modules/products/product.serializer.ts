@@ -19,6 +19,8 @@ export const productListSelect = {
   compareAtPrice: true,
   status: true,
   featured: true,
+  ratingAverage: true,
+  ratingCount: true,
   createdAt: true,
   publishedAt: true,
   category: { select: { id: true, name: true, slug: true } },
@@ -45,6 +47,8 @@ export function toProductListItem(p: ProductListRow) {
     discountPercent: discountPercent(p.price, p.compareAtPrice),
     status: p.status,
     featured: p.featured,
+    ratingAverage: p.ratingAverage,
+    ratingCount: p.ratingCount,
     category: p.category,
     image: p.images[0]?.url ?? null,
     hoverImage: p.images[1]?.url ?? p.images[0]?.url ?? null,
@@ -94,6 +98,18 @@ export function toProductDetail(p: ProductDetailRow, { includeInactive = false }
     discountPercent: discountPercent(p.price, p.compareAtPrice),
     status: p.status,
     featured: p.featured,
+    /// Fabric and care copy the product page needs (FR-03.1).
+    material: p.material,
+    careInstructions: p.careInstructions,
+    /// Recomputed from approved reviews; display only.
+    ratingAverage: p.ratingAverage,
+    ratingCount: p.ratingCount,
+    /// Fall back to the product's own copy when no override is set.
+    seo: {
+      title: p.seoTitle ?? p.name,
+      description: p.seoDescription ?? p.shortDescription,
+      noindex: p.seoNoindex,
+    },
     category: p.category,
     images: p.images.map((i) => ({
       id: i.id,

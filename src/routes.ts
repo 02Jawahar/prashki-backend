@@ -12,6 +12,27 @@ import { webhookRouter } from './modules/webhooks/webhook.routes.js'
 import { adminProductRouter } from './modules/products/admin-product.routes.js'
 import { adminCategoryRouter } from './modules/categories/admin-category.routes.js'
 import { adminMediaRouter } from './modules/media/media.routes.js'
+import { adminCouponRouter } from './modules/coupons/admin-coupon.routes.js'
+import { adminShippingRouter, shippingRouter } from './modules/shipping/shipping.routes.js'
+import { adminShipmentRouter, trackingRouter } from './modules/shipments/shipment.routes.js'
+import {
+  adminRefundRouter,
+  adminReturnRouter,
+  returnRouter,
+} from './modules/returns/return.routes.js'
+import { adminPageRouter, pageRouter } from './modules/content/page.routes.js'
+import { adminRedirectRouter, redirectRouter } from './modules/content/redirect.routes.js'
+import { seoRouter } from './modules/content/seo.routes.js'
+import {
+  adminMessageRouter,
+  notificationRouter,
+  preferenceRouter,
+} from './modules/notifications/notification.routes.js'
+import { wishlistRouter } from './modules/wishlist/wishlist.routes.js'
+import { adminReviewRouter, reviewRouter } from './modules/reviews/review.routes.js'
+import { adminAttributeRouter } from './modules/attributes/attribute.routes.js'
+import { adminReportRouter } from './modules/reports/report.routes.js'
+import { analyticsRouter } from './modules/analytics/analytics.routes.js'
 import {
   adminCustomerRouter,
   adminDashboardRouter,
@@ -36,11 +57,22 @@ apiRouter.use('/auth', authRouter)
 apiRouter.use('/products', productRouter)
 apiRouter.use('/categories', categoryRouter)
 apiRouter.use('/cart', cartRouter)
+apiRouter.use('/shipping', shippingRouter)
+apiRouter.use('/pages', pageRouter)
+apiRouter.use('/redirects', redirectRouter)
+apiRouter.use('/seo', seoRouter)
+apiRouter.use('/reviews', reviewRouter)
+apiRouter.use('/analytics', analyticsRouter)
 
 // ------------------------------------------------------ authenticated only
 apiRouter.use('/addresses', addressRouter)
 apiRouter.use('/orders', orderRouter)
 apiRouter.use('/payments', paymentRouter)
+apiRouter.use('/tracking', trackingRouter)
+apiRouter.use('/returns', returnRouter)
+apiRouter.use('/notifications', notificationRouter)
+apiRouter.use('/notification-preferences', preferenceRouter)
+apiRouter.use('/wishlist', wishlistRouter)
 
 // Authenticated by signature, not by session — see the router for why.
 apiRouter.use('/webhooks', webhookRouter)
@@ -89,6 +121,17 @@ adminRouter.use('/categories', adminCategoryRouter)
 adminRouter.use('/media', adminMediaRouter)
 adminRouter.use('/inventory', adminInventoryRouter)
 adminRouter.use('/orders', adminOrderRouter)
+adminRouter.use('/coupons', adminCouponRouter)
+adminRouter.use('/shipping', adminShippingRouter)
+adminRouter.use('/shipments', adminShipmentRouter)
+adminRouter.use('/returns', adminReturnRouter)
+adminRouter.use('/refunds', adminRefundRouter)
+adminRouter.use('/pages', adminPageRouter)
+adminRouter.use('/redirects', adminRedirectRouter)
+adminRouter.use('/messaging', adminMessageRouter)
+adminRouter.use('/reviews', adminReviewRouter)
+adminRouter.use('/attributes', adminAttributeRouter)
+adminRouter.use('/reports', adminReportRouter)
 adminRouter.use('/customers', adminCustomerRouter)
 adminRouter.use('/settings', adminSettingsRouter)
 

@@ -33,6 +33,32 @@ export const changePasswordSchema = z.object({
   newPassword: password,
 })
 
+export const forgotPasswordSchema = z.object({ email })
+
+export const resetPasswordSchema = z.object({
+  token: z.string().trim().min(20, 'That reset link is invalid or has expired'),
+  password,
+})
+
+/**
+ * Email is absent on purpose — changing the address that identifies an account
+ * needs a verification round-trip, not a profile PATCH.
+ */
+export const updateProfileSchema = z
+  .object({
+    name: z.string().trim().min(2, 'Enter your name').max(120).optional(),
+    phone: z
+      .string()
+      .trim()
+      .regex(/^\+?[0-9\s-]{7,20}$/, 'Enter a valid phone number')
+      .or(z.literal(''))
+      .optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, 'Nothing to update')
+
 export type RegisterInput = z.infer<typeof registerSchema>
 export type LoginInput = z.infer<typeof loginSchema>
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>
+export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>
+export type UpdateProfileInput = z.infer<typeof updateProfileSchema>

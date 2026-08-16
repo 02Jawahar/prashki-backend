@@ -17,6 +17,9 @@ const SORTS: Record<string, Prisma.ProductOrderByWithRelationInput | Prisma.Prod
   'price-desc': { price: 'desc' },
   'name-asc': { name: 'asc' },
   'name-desc': { name: 'desc' },
+  // Products with no reviews sort last rather than tying at zero with the
+  // genuinely poorly-reviewed ones.
+  rating: [{ ratingAverage: 'desc' }, { ratingCount: 'desc' }],
 }
 
 function buildWhere(
@@ -59,6 +62,33 @@ function buildWhere(
     and.push({ variants: { every: { inventory: { availableStock: { lte: 0 } } } } })
   }
 
+  if (q.minRating !== undefined) and.push({ ratingAverage: { gte: q.minRating } })
+
+  /**
+   * Facets. One AND clause per attribute, each requiring a variant carrying any
+   * of that attribute's selected values — so "size M or L" and "colour sage"
+   * combine the way the filter panel implies.
+   */
+  if (q.attributes) {
+    for (const [attribute, values] of q.attributes) {
+      and.push({
+        variants: {
+          some: {
+            status: 'ACTIVE',
+            attributes: {
+              some: {
+                attributeValue: {
+                  slug: { in: values },
+                  attribute: { slug: attribute },
+                },
+              },
+            },
+          },
+        },
+      })
+    }
+  }
+
   return and.length ? { AND: and } : {}
 }
 
@@ -78,6 +108,72 @@ export async function listPublicProducts(q: PublicListQuery) {
   ])
 
   return { products: rows.map(toProductListItem), total }
+}
+
+/**
+ * Filter options for a result set (M12).
+ *
+ * Counts are computed against the *unfaceted* query — the same category and
+ * search terms, but without the attribute selections — so ticking one size
+ * does not make every other size vanish from the panel. That is the behaviour
+ * shoppers expect and the one that makes a filter panel usable.
+ */
+export async function listFacets(q: PublicListQuery) {
+  const { attributes: _selected, ...unfaceted } = q
+  const where = buildWhere(unfaceted as PublicListQuery, { statuses: ['ACTIVE'] })
+
+  const [attributes, priceRange, categories] = await Promise.all([
+    prisma.attribute.findMany({
+      where: { isFilterable: true },
+      orderBy: { position: 'asc' },
+      include: {
+        values: {
+          orderBy: { position: 'asc' },
+          include: {
+            _count: {
+              select: {
+                variants: {
+                  where: { variant: { status: 'ACTIVE', product: where } },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    prisma.product.aggregate({ where, _min: { price: true }, _max: { price: true } }),
+    prisma.category.findMany({
+      where: { status: 'ACTIVE' },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: {
+        id: true,
+        slug: true,
+        name: true,
+        _count: { select: { products: { where: { status: 'ACTIVE' } } } },
+      },
+    }),
+  ])
+
+  return {
+    attributes: attributes.map((attribute) => ({
+      slug: attribute.slug,
+      name: attribute.name,
+      isSwatch: attribute.isSwatch,
+      values: attribute.values
+        .map((value) => ({
+          slug: value.slug,
+          value: value.value,
+          colorHex: value.colorHex,
+          count: value._count.variants,
+        }))
+        // A value nothing matches is noise in the panel.
+        .filter((value) => value.count > 0),
+    })).filter((attribute) => attribute.values.length > 0),
+    price: { min: priceRange._min.price ?? 0, max: priceRange._max.price ?? 0 },
+    categories: categories
+      .map((c) => ({ slug: c.slug, name: c.name, count: c._count.products }))
+      .filter((c) => c.count > 0),
+  }
 }
 
 export async function getPublicProductBySlug(slug: string) {

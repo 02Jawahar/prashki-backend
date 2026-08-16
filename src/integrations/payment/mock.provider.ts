@@ -4,6 +4,8 @@ import type {
   CreateProviderOrderInput,
   PaymentProvider,
   ProviderOrder,
+  ProviderRefund,
+  RefundInput,
   VerifiedPayment,
   VerifyPaymentInput,
   WebhookEvent,
@@ -59,6 +61,16 @@ export class MockPaymentProvider implements PaymentProvider {
       valid,
       providerPaymentId: input.providerPaymentId,
       reason: valid ? undefined : 'Signature verification failed',
+    }
+  }
+
+  /** No money moves; the refund is recorded so the rest of the flow is real. */
+  async refund(input: RefundInput): Promise<ProviderRefund> {
+    return {
+      providerRefundId: `mock_rfnd_${crypto.randomBytes(10).toString('hex')}`,
+      amount: input.amount,
+      status: 'processed',
+      raw: { mock: true, providerPaymentId: input.providerPaymentId, reference: input.reference },
     }
   }
 

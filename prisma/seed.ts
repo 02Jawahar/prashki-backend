@@ -34,18 +34,43 @@ const PERMISSIONS = [
   { key: 'category.manage', group: 'Catalog', label: 'Manage categories' },
   { key: 'media.upload', group: 'Catalog', label: 'Upload product media' },
 
+  { key: 'attribute.manage', group: 'Catalog', label: 'Manage sizes, colours and other options' },
+
   { key: 'inventory.read', group: 'Inventory', label: 'View stock' },
   { key: 'inventory.adjust', group: 'Inventory', label: 'Adjust stock' },
 
   { key: 'order.read', group: 'Orders', label: 'View orders' },
+  { key: 'order.update', group: 'Orders', label: 'Edit order details and internal notes' },
   { key: 'order.update_status', group: 'Orders', label: 'Change order status' },
   { key: 'order.cancel', group: 'Orders', label: 'Cancel orders' },
+  { key: 'shipment.manage', group: 'Orders', label: 'Create shipments and add tracking' },
+
+  { key: 'return.read', group: 'Returns', label: 'View return requests' },
+  { key: 'return.manage', group: 'Returns', label: 'Approve, reject and process returns' },
+  { key: 'refund.create', group: 'Returns', label: 'Issue refunds' },
+
+  { key: 'coupon.read', group: 'Marketing', label: 'View coupons' },
+  { key: 'coupon.manage', group: 'Marketing', label: 'Create and edit coupons' },
+  { key: 'review.moderate', group: 'Marketing', label: 'Moderate product reviews' },
+  { key: 'message.manage', group: 'Marketing', label: 'Edit email and WhatsApp templates' },
+
+  { key: 'content.read', group: 'Content', label: 'View pages and redirects' },
+  { key: 'content.manage', group: 'Content', label: 'Edit pages, blocks and redirects' },
 
   { key: 'customer.read', group: 'Customers', label: 'View customers' },
   { key: 'customer.update', group: 'Customers', label: 'Edit customers' },
+  /**
+   * Contact details are masked for everyone without this. It is a separate
+   * capability from customer.read so support staff can do their job without
+   * every phone number in the database passing through their screen.
+   */
+  { key: 'customer.read_pii', group: 'Customers', label: 'See unmasked contact details' },
+
+  { key: 'report.read', group: 'Reports', label: 'View sales and inventory reports' },
 
   { key: 'settings.read', group: 'Settings', label: 'View settings' },
   { key: 'settings.update', group: 'Settings', label: 'Change settings' },
+  { key: 'shipping.manage', group: 'Settings', label: 'Manage shipping zones and rates' },
 
   { key: 'user.manage', group: 'System', label: 'Manage staff accounts' },
   { key: 'role.manage', group: 'System', label: 'Manage roles' },
@@ -64,27 +89,35 @@ const ROLES = [
   {
     key: 'CATALOG_MANAGER',
     name: 'Catalog Manager',
-    description: 'Products, categories, media and stock.',
+    description: 'Products, categories, media, stock and merchandising content.',
     permissions: [
       'dashboard.read', 'product.read', 'product.create', 'product.update',
       'product.delete', 'product.publish', 'category.manage', 'media.upload',
-      'inventory.read', 'inventory.adjust', 'order.read',
+      'attribute.manage', 'inventory.read', 'inventory.adjust', 'order.read',
+      'coupon.read', 'coupon.manage', 'review.moderate',
+      'content.read', 'content.manage', 'report.read',
     ],
   },
   {
     key: 'ORDER_MANAGER',
     name: 'Order Manager',
-    description: 'Order fulfilment and customer lookup.',
+    description: 'Order fulfilment, shipping, returns and customer lookup.',
     permissions: [
       'dashboard.read', 'product.read', 'inventory.read', 'order.read',
-      'order.update_status', 'order.cancel', 'customer.read',
+      'order.update', 'order.update_status', 'order.cancel', 'shipment.manage',
+      'return.read', 'return.manage', 'refund.create',
+      // Packing slips and courier handovers need the real address and phone.
+      'customer.read', 'customer.read_pii', 'report.read',
     ],
   },
   {
     key: 'SUPPORT',
     name: 'Support',
-    description: 'Read-only access for answering customer questions.',
-    permissions: ['dashboard.read', 'product.read', 'order.read', 'customer.read'],
+    description: 'Answering customer questions. Reads widely, changes little.',
+    permissions: [
+      'dashboard.read', 'product.read', 'order.read', 'order.update',
+      'customer.read', 'return.read', 'coupon.read', 'content.read',
+    ],
   },
 ] as const
 
@@ -141,12 +174,42 @@ function skuBase(slug: string): string {
 async function wipe() {
   // Children before parents where cascades don't cover it.
   await prisma.auditLog.deleteMany()
+  await prisma.analyticsEvent.deleteMany()
+  await prisma.messageLog.deleteMany()
+  await prisma.messageTemplate.deleteMany()
+  await prisma.notification.deleteMany()
+  await prisma.notificationPreference.deleteMany()
   await prisma.webhookEvent.deleteMany()
   await prisma.paymentTransaction.deleteMany()
   await prisma.payment.deleteMany()
+  await prisma.refund.deleteMany()
+  await prisma.returnStatusHistory.deleteMany()
+  await prisma.returnItem.deleteMany()
+  await prisma.returnRequest.deleteMany()
+  await prisma.shipmentEvent.deleteMany()
+  await prisma.shipmentItem.deleteMany()
+  await prisma.shipment.deleteMany()
+  await prisma.review.deleteMany()
+  await prisma.wishlistItem.deleteMany()
+  await prisma.couponRedemption.deleteMany()
+  await prisma.couponProduct.deleteMany()
+  await prisma.couponCategory.deleteMany()
+  await prisma.coupon.deleteMany()
+  await prisma.checkoutSession.deleteMany()
   await prisma.orderStatusHistory.deleteMany()
   await prisma.orderItem.deleteMany()
   await prisma.order.deleteMany()
+  await prisma.shippingMethod.deleteMany()
+  await prisma.shippingZone.deleteMany()
+  await prisma.pageRevision.deleteMany()
+  await prisma.page.deleteMany()
+  await prisma.redirect.deleteMany()
+  await prisma.consent.deleteMany()
+  await prisma.customerNote.deleteMany()
+  await prisma.passwordResetToken.deleteMany()
+  await prisma.variantAttributeValue.deleteMany()
+  await prisma.attributeValue.deleteMany()
+  await prisma.attribute.deleteMany()
   await prisma.cartItem.deleteMany()
   await prisma.cart.deleteMany()
   await prisma.inventoryMovement.deleteMany()
@@ -421,6 +484,403 @@ async function seedSettings() {
   await prisma.setting.createMany({ data: settings })
 }
 
+// ---------------------------------------------------------------------------
+// Attributes, shipping, content and messaging
+// ---------------------------------------------------------------------------
+
+/**
+ * The faceting vocabulary. Values are attached to the seeded variants so the
+ * storefront's size filter has something to filter on from the first run.
+ */
+async function seedAttributes() {
+  const size = await prisma.attribute.create({
+    data: {
+      name: 'Size',
+      slug: 'size',
+      isSwatch: false,
+      isFilterable: true,
+      position: 0,
+      values: {
+        create: [...SIZES, 'One size'].map((value, position) => ({
+          value,
+          slug: value.toLowerCase().replace(/\s+/g, '-'),
+          position,
+        })),
+      },
+    },
+    include: { values: true },
+  })
+
+  await prisma.attribute.create({
+    data: {
+      name: 'Colour',
+      slug: 'colour',
+      isSwatch: true,
+      isFilterable: true,
+      position: 1,
+      values: {
+        create: [
+          { value: 'Sage', slug: 'sage', colorHex: '#838E5E', position: 0 },
+          { value: 'Ivory', slug: 'ivory', colorHex: '#F3EFE6', position: 1 },
+          { value: 'Clay', slug: 'clay', colorHex: '#B08968', position: 2 },
+          { value: 'Ink', slug: 'ink', colorHex: '#2B2B2B', position: 3 },
+        ],
+      },
+    },
+  })
+
+  // Link each variant to the size value whose name it already carries.
+  const bySlug = new Map(size.values.map((v) => [v.value, v.id]))
+  const variants = await prisma.productVariant.findMany({ select: { id: true, name: true } })
+
+  const links = variants
+    .map((variant) => {
+      const valueId = bySlug.get(variant.name === 'Default' ? 'One size' : variant.name)
+      return valueId ? { variantId: variant.id, attributeValueId: valueId } : null
+    })
+    .filter((row): row is { variantId: string; attributeValueId: string } => row !== null)
+
+  if (links.length > 0) await prisma.variantAttributeValue.createMany({ data: links })
+
+  return links.length
+}
+
+/**
+ * One India-wide zone plus a metro zone that ships faster. The default flag on
+ * the national zone is what keeps an unusual address deliverable.
+ */
+async function seedShipping() {
+  await prisma.shippingZone.create({
+    data: {
+      name: 'India',
+      countries: ['IN'],
+      regions: [],
+      isDefault: true,
+      isActive: true,
+      position: 1,
+      methods: {
+        create: [
+          {
+            name: 'Standard delivery',
+            description: 'Delivered by our courier partners.',
+            rate: 15_000,
+            freeAbove: 500_000,
+            minDays: 4,
+            maxDays: 7,
+            position: 0,
+          },
+          {
+            name: 'Express delivery',
+            description: 'Priority despatch, tracked end to end.',
+            rate: 35_000,
+            minDays: 2,
+            maxDays: 3,
+            position: 1,
+          },
+          {
+            name: 'Cash on delivery',
+            description: 'Pay the courier when your order arrives.',
+            rate: 15_000,
+            isCod: true,
+            codFee: 5_000,
+            maxSubtotal: 1_500_000,
+            minDays: 4,
+            maxDays: 7,
+            position: 2,
+          },
+        ],
+      },
+    },
+  })
+
+  await prisma.shippingZone.create({
+    data: {
+      name: 'Metro cities',
+      countries: ['IN'],
+      // Matched by state name or PIN prefix — see resolveZone.
+      regions: ['Delhi', 'Maharashtra', 'Karnataka', 'Telangana', 'Tamil Nadu'],
+      isActive: true,
+      position: 0,
+      methods: {
+        create: [
+          {
+            name: 'Standard delivery',
+            description: 'Delivered by our courier partners.',
+            rate: 9_000,
+            freeAbove: 300_000,
+            minDays: 2,
+            maxDays: 4,
+            position: 0,
+          },
+          {
+            name: 'Next-day delivery',
+            description: 'Order before 2pm for delivery tomorrow.',
+            rate: 29_000,
+            minDays: 1,
+            maxDays: 1,
+            position: 1,
+          },
+        ],
+      },
+    },
+  })
+}
+
+/** Policy pages the footer and checkout link to. Marked system so they stay. */
+async function seedPages() {
+  const pages = [
+    {
+      slug: 'about',
+      title: 'About Prash & Ki',
+      blocks: [
+        {
+          type: 'richText',
+          data: {
+            html: '<p>Prash &amp; Ki is a small studio making crafted couture in limited runs. Every piece is cut, sewn and finished by hand.</p>',
+          },
+        },
+      ],
+      seoDescription: 'A small studio making crafted couture in limited runs.',
+    },
+    {
+      slug: 'contact',
+      title: 'Contact',
+      blocks: [
+        {
+          type: 'richText',
+          data: {
+            html: '<p>Write to us and we will reply within one working day.</p>',
+          },
+        },
+      ],
+      seoDescription: 'Get in touch with the Prash & Ki studio.',
+    },
+    {
+      slug: 'shipping-policy',
+      title: 'Shipping',
+      blocks: [
+        {
+          type: 'richText',
+          data: {
+            html: '<p>Orders are despatched within two working days. Delivery estimates are shown at checkout for your address.</p>',
+          },
+        },
+      ],
+      seoDescription: 'How and when we deliver.',
+    },
+    {
+      slug: 'returns-policy',
+      title: 'Returns',
+      blocks: [
+        {
+          type: 'richText',
+          data: {
+            html: '<p>Unworn pieces may be returned within seven days of delivery. Start a return from your account.</p>',
+          },
+        },
+      ],
+      seoDescription: 'Our seven-day return policy.',
+    },
+    {
+      slug: 'privacy-policy',
+      title: 'Privacy',
+      blocks: [
+        {
+          type: 'richText',
+          data: {
+            html: '<p>We collect only what an order needs, and never sell your details.</p>',
+          },
+        },
+      ],
+      seoDescription: 'What we collect, and why.',
+    },
+    {
+      slug: 'terms',
+      title: 'Terms of Service',
+      blocks: [
+        { type: 'richText', data: { html: '<p>The terms that apply when you buy from us.</p>' } },
+      ],
+      seoDescription: 'The terms that apply when you buy from us.',
+    },
+  ]
+
+  for (const page of pages) {
+    await prisma.page.create({
+      data: {
+        slug: page.slug,
+        title: page.title,
+        status: 'PUBLISHED',
+        isSystem: true,
+        publishedAt: new Date(),
+        blocks: page.blocks as unknown as Prisma.InputJsonValue,
+        seoDescription: page.seoDescription,
+        revisions: {
+          create: {
+            version: 1,
+            title: page.title,
+            blocks: page.blocks as unknown as Prisma.InputJsonValue,
+            note: 'Seeded',
+          },
+        },
+      },
+    })
+  }
+
+  return pages.length
+}
+
+/**
+ * Default copy for every message the store sends. Editable from admin, so this
+ * is a starting point rather than the final wording.
+ */
+async function seedMessageTemplates() {
+  const templates: Array<{
+    key: string
+    channel: 'EMAIL' | 'WHATSAPP' | 'SMS'
+    name: string
+    subject?: string
+    body: string
+    variables: string[]
+  }> = [
+    {
+      key: 'account.welcome',
+      channel: 'EMAIL',
+      name: 'Welcome',
+      subject: 'Welcome to Prash & Ki',
+      body: 'Hello {{name}},\n\nThank you for joining us. Your account is ready.\n\nPrash & Ki',
+      variables: ['name'],
+    },
+    {
+      key: 'account.password_reset',
+      channel: 'EMAIL',
+      name: 'Password reset',
+      subject: 'Reset your password',
+      body: 'Hello {{name}},\n\nUse this link to set a new password. It expires in {{expiresInMinutes}} minutes:\n\n{{url}}\n\nIf you did not ask for this, you can ignore this email.',
+      variables: ['name', 'url', 'expiresInMinutes'],
+    },
+    {
+      key: 'order.placed',
+      channel: 'EMAIL',
+      name: 'Order confirmation',
+      subject: 'Order {{orderNumber}} received',
+      body: 'Hello {{name}},\n\nWe have your order {{orderNumber}} for {{total}}.\n\n{{items}}\n\nWe will email again when it ships.',
+      variables: ['name', 'orderNumber', 'total', 'items', 'itemCount'],
+    },
+    {
+      key: 'order.placed',
+      channel: 'WHATSAPP',
+      name: 'Order confirmation (WhatsApp)',
+      body: 'Hi {{name}} — we have your Prash & Ki order {{orderNumber}} for {{total}}.',
+      variables: ['name', 'orderNumber', 'total'],
+    },
+    {
+      key: 'order.paid',
+      channel: 'EMAIL',
+      name: 'Payment received',
+      subject: 'Payment received for {{orderNumber}}',
+      body: 'Hello {{name}},\n\nWe have received {{total}} for order {{orderNumber}}. Thank you.',
+      variables: ['name', 'orderNumber', 'total'],
+    },
+    {
+      key: 'order.paid',
+      channel: 'SMS',
+      name: 'Payment received (SMS)',
+      body: 'Prash & Ki: payment of {{total}} received for order {{orderNumber}}.',
+      variables: ['orderNumber', 'total'],
+    },
+    {
+      key: 'order.shipped',
+      channel: 'EMAIL',
+      name: 'Order shipped',
+      subject: 'Order {{orderNumber}} is on its way',
+      body: 'Hello {{name}},\n\nYour order {{orderNumber}} has left the studio.\n\nCarrier: {{carrier}}\nTracking: {{trackingNumber}}\n{{trackingUrl}}',
+      variables: ['name', 'orderNumber', 'carrier', 'trackingNumber', 'trackingUrl'],
+    },
+    {
+      key: 'order.shipped',
+      channel: 'WHATSAPP',
+      name: 'Order shipped (WhatsApp)',
+      body: 'Hi {{name}} — order {{orderNumber}} has shipped. Track it here: {{trackingUrl}}',
+      variables: ['name', 'orderNumber', 'trackingUrl'],
+    },
+    {
+      key: 'order.delivered',
+      channel: 'EMAIL',
+      name: 'Order delivered',
+      subject: 'Order {{orderNumber}} delivered',
+      body: 'Hello {{name}},\n\nOrder {{orderNumber}} has been delivered. We would love to know what you think.',
+      variables: ['name', 'orderNumber'],
+    },
+    {
+      key: 'order.cancelled',
+      channel: 'EMAIL',
+      name: 'Order cancelled',
+      subject: 'Order {{orderNumber}} cancelled',
+      body: 'Hello {{name}},\n\nOrder {{orderNumber}} has been cancelled. Any payment taken will be returned to your original method.',
+      variables: ['name', 'orderNumber'],
+    },
+    {
+      key: 'return.updated',
+      channel: 'EMAIL',
+      name: 'Return update',
+      subject: 'Update on return {{returnNumber}}',
+      body: 'Hello {{name}},\n\nYour return {{returnNumber}} is now {{status}}.\n\n{{note}}',
+      variables: ['name', 'returnNumber', 'status', 'note'],
+    },
+    {
+      key: 'refund.issued',
+      channel: 'EMAIL',
+      name: 'Refund issued',
+      subject: 'Refund for order {{orderNumber}}',
+      body: 'Hello {{name}},\n\nWe have sent {{amount}} back to your original payment method for order {{orderNumber}}. It usually arrives within 5-7 working days.',
+      variables: ['name', 'orderNumber', 'amount'],
+    },
+  ]
+
+  await prisma.messageTemplate.createMany({
+    data: templates.map((t) => ({
+      key: t.key,
+      channel: t.channel,
+      name: t.name,
+      subject: t.subject ?? null,
+      body: t.body,
+      variables: t.variables,
+      isActive: true,
+    })),
+  })
+
+  return templates.length
+}
+
+/** Two live coupons so the cart's discount path is exercised from day one. */
+async function seedCoupons() {
+  await prisma.coupon.createMany({
+    data: [
+      {
+        code: 'WELCOME10',
+        description: '10% off your first order',
+        type: 'PERCENTAGE',
+        status: 'ACTIVE',
+        // basis points: 1000 = 10%
+        value: 1000,
+        maxDiscount: 200_000,
+        minSubtotal: 500_000,
+        perUserLimit: 1,
+        firstOrderOnly: true,
+        excludeDiscounted: true,
+      },
+      {
+        code: 'FREESHIP',
+        description: 'Free delivery, no minimum',
+        type: 'FREE_SHIPPING',
+        status: 'ACTIVE',
+        value: 0,
+      },
+    ],
+  })
+  return 2
+}
+
 /**
  * Copies the committed demo imagery into the storage directory.
  *
@@ -472,6 +932,23 @@ async function main() {
   ])
 
   console.log(`  ${products} products, ${variants} variants, ${stock._sum.availableStock} units in stock`)
+
+  // Attributes come after products so the size values can be linked to the
+  // variants that already exist.
+  const attributeLinks = await seedAttributes()
+  console.log(`  2 attributes, ${attributeLinks} variant options`)
+
+  await seedShipping()
+  console.log('  2 shipping zones, 5 delivery methods')
+
+  const pages = await seedPages()
+  console.log(`  ${pages} content pages`)
+
+  const templates = await seedMessageTemplates()
+  console.log(`  ${templates} message templates`)
+
+  const coupons = await seedCoupons()
+  console.log(`  ${coupons} coupons`)
   console.log('\nSign in (development only — from your environment):')
   console.log(`  admin     ${env.ADMIN_EMAIL} / ${env.ADMIN_PASSWORD}`)
   console.log(`  customer  ${env.CUSTOMER_EMAIL} / ${env.CUSTOMER_PASSWORD}`)

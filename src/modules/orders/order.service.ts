@@ -1,9 +1,12 @@
-import type { OrderStatus, Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
+import type { OrderStatus } from '@prisma/client'
 import { prisma } from '../../config/db.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { percentOf } from '../../utils/money.js'
 import { emit } from '../../events/bus.js'
 import { recordAudit } from '../../utils/audit.js'
+import { evaluateCoupon, recordRedemption, releaseRedemption } from '../coupons/coupon.service.js'
+import { priceChosenMethod } from '../shipping/shipping.service.js'
 
 /**
  * Order creation (spec §25, §50).
@@ -21,6 +24,12 @@ export interface CreateOrderInput {
   userId: string
   addressId: string
   notes?: string
+  /**
+   * Optional so the settings-based flat rate still works for a store that has
+   * not configured zones. When present it is re-validated against the delivery
+   * address — the client picks an id, never a price.
+   */
+  shippingMethodId?: string
 }
 
 /** Store-wide charges live in settings, not in code (spec §37). */
@@ -78,7 +87,7 @@ export async function createOrder(input: CreateOrderInput) {
       if (!address) throw new NotFoundError('Address', 'ADDRESS_NOT_FOUND')
 
       // ---- price and validate every line from the database ----
-      const lines = cart.items.map((item) => {
+      const priced = cart.items.map((item) => {
         const { variant } = item
         const { product } = variant
 
@@ -98,6 +107,9 @@ export async function createOrder(input: CreateOrderInput) {
 
         const unitPrice = variant.price ?? product.price
         return {
+          cartItemId: item.id,
+          categoryId: product.categoryId,
+          isDiscounted: product.compareAtPrice !== null && product.compareAtPrice > unitPrice,
           variantId: variant.id,
           productId: product.id,
           productNameSnapshot: product.name,
@@ -110,13 +122,65 @@ export async function createOrder(input: CreateOrderInput) {
         }
       })
 
-      const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0)
-      const shipping =
-        charges.freeShippingThreshold > 0 && subtotal >= charges.freeShippingThreshold
+      const subtotal = priced.reduce((sum, l) => sum + l.lineTotal, 0)
+
+      /**
+       * The coupon is re-evaluated here, not carried over from the cart read.
+       * Between adding the code and pressing pay, it may have expired, been
+       * paused, hit its limit, or stopped matching the bag — and the customer
+       * may have edited the bag itself. Only this evaluation decides the money.
+       */
+      const evaluation = cart.couponCode
+        ? await evaluateCoupon({
+            code: cart.couponCode,
+            userId: input.userId,
+            subtotal,
+            lines: priced.map((l) => ({
+              id: l.cartItemId,
+              productId: l.productId,
+              categoryIds: l.categoryId ? [l.categoryId] : [],
+              unitPrice: l.unitPrice,
+              quantity: l.quantity,
+              lineTotal: l.lineTotal,
+              isDiscounted: l.isDiscounted,
+            })),
+          })
+        : null
+
+      const discount = evaluation?.discount ?? 0
+
+      const lines = priced.map(({ cartItemId, categoryId: _c, isDiscounted: _d, ...line }) => ({
+        ...line,
+        discountAllocated: evaluation?.allocation[cartItemId] ?? 0,
+      }))
+
+      const shippingWaived = evaluation?.freeShipping ?? false
+
+      /**
+       * A configured method wins; the settings flat rate is the fallback for a
+       * store with no zones set up yet. Either way the amount is computed here,
+       * server-side, from the address the order is actually going to.
+       */
+      const quote = input.shippingMethodId
+        ? await priceChosenMethod(input.shippingMethodId, {
+            country: address.country,
+            state: address.state,
+            postalCode: address.postalCode,
+            subtotal: subtotal - discount,
+            freeShippingCoupon: shippingWaived,
+          })
+        : null
+
+      const shipping = quote
+        ? quote.cost + (quote.isCod ? quote.codFee : 0)
+        : shippingWaived
           ? 0
-          : charges.shippingFee
-      const tax = percentOf(subtotal, charges.taxPercent)
-      const discount = 0 // no coupon engine in this phase
+          : charges.freeShippingThreshold > 0 && subtotal >= charges.freeShippingThreshold
+            ? 0
+            : charges.shippingFee
+      // Tax follows the discounted goods value — charging tax on money the
+      // customer never paid would overcharge them.
+      const tax = percentOf(subtotal - discount, charges.taxPercent)
       const total = subtotal - discount + shipping + tax
 
       const order = await tx.order.create({
@@ -131,6 +195,10 @@ export async function createOrder(input: CreateOrderInput) {
           total,
           currency: 'INR',
           notes: input.notes ?? null,
+          ...(evaluation
+            ? { couponId: evaluation.coupon.id, couponCode: evaluation.coupon.code }
+            : {}),
+          ...(quote ? { shippingMethodId: quote.id, shippingMethodName: quote.name } : {}),
           // Frozen copy — the address row may be edited or deleted later.
           shippingAddressSnapshot: {
             name: address.name,
@@ -193,14 +261,133 @@ export async function createOrder(input: CreateOrderInput) {
         },
       })
 
+      if (evaluation) {
+        await recordRedemption(tx, {
+          coupon: evaluation.coupon,
+          userId: input.userId,
+          orderId: order.id,
+          amount: discount,
+        })
+      }
+
       // The cart has become an order; clearing it prevents a double submit.
-      await tx.cartItem.deleteMany({ where: { cartId: cart.id } })
+      await tx.cart.update({
+        where: { id: cart.id },
+        data: { couponCode: null, items: { deleteMany: {} } },
+      })
 
       return order
     },
     // Stock decrements must not interleave with another checkout's reads.
     { isolationLevel: 'Serializable', timeout: 15_000 },
   )
+}
+
+/**
+ * How long an in-flight checkout blocks a retry with the same key. Long enough
+ * that a slow payment page cannot double-submit, short enough that a genuinely
+ * crashed attempt does not strand the customer.
+ */
+const CHECKOUT_SESSION_TTL_MS = 30 * 60_000
+
+export interface IdempotentOrderResult {
+  order: Awaited<ReturnType<typeof createOrder>>
+  /** True when this request returned an order a previous request had created. */
+  replayed: boolean
+}
+
+/**
+ * Checkout submit, made safe to retry (FR-8.7).
+ *
+ * A double-clicked "Place order", a flaky connection retried by the browser, or
+ * a mobile app resending after a timeout must all end with *one* order and one
+ * stock decrement. The client sends an idempotency key; this function makes the
+ * key the thing that owns the order.
+ *
+ * The unique constraint on `idempotencyKey` is what actually enforces this —
+ * two simultaneous requests race to insert, one wins, the loser reads the
+ * winner's row. Checking first and inserting after would leave a gap.
+ */
+export async function createOrderIdempotent(
+  input: CreateOrderInput & { idempotencyKey?: string },
+): Promise<IdempotentOrderResult> {
+  const { idempotencyKey, ...orderInput } = input
+
+  if (!idempotencyKey) {
+    return { order: await createOrder(orderInput), replayed: false }
+  }
+
+  const now = new Date()
+  let sessionId: string
+
+  try {
+    const session = await prisma.checkoutSession.create({
+      data: {
+        idempotencyKey,
+        userId: orderInput.userId,
+        status: 'started',
+        payload: { addressId: orderInput.addressId },
+        expiresAt: new Date(now.getTime() + CHECKOUT_SESSION_TTL_MS),
+      },
+    })
+    sessionId = session.id
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') throw err
+
+    const existing = await prisma.checkoutSession.findUnique({
+      where: { idempotencyKey },
+      include: { order: { include: { items: true } } },
+    })
+    // The row must exist — we just collided with it — but a concurrent cleanup
+    // could have removed it, in which case there is nothing to replay.
+    if (!existing) throw err
+
+    // A key is scoped to the customer who minted it. Someone else presenting it
+    // gets the same answer as any other bad key, never a peek at the order.
+    if (existing.userId !== orderInput.userId) {
+      throw new ValidationError('That checkout could not be completed')
+    }
+
+    if (existing.order) {
+      return { order: existing.order, replayed: true }
+    }
+
+    if (existing.status === 'started' && existing.expiresAt > now) {
+      throw new ConflictError(
+        'That order is already being placed — hold on a moment',
+        'CHECKOUT_IN_PROGRESS',
+      )
+    }
+
+    // A failed or timed-out attempt is allowed to be retried under the same key.
+    await prisma.checkoutSession.update({
+      where: { id: existing.id },
+      data: {
+        status: 'started',
+        error: null,
+        expiresAt: new Date(now.getTime() + CHECKOUT_SESSION_TTL_MS),
+      },
+    })
+    sessionId = existing.id
+  }
+
+  try {
+    const order = await createOrder(orderInput)
+    await prisma.checkoutSession.update({
+      where: { id: sessionId },
+      data: { status: 'completed', orderId: order.id },
+    })
+    return { order, replayed: false }
+  } catch (err) {
+    await prisma.checkoutSession
+      .update({
+        where: { id: sessionId },
+        data: { status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' },
+      })
+      // Recording the failure must not replace the failure the caller needs.
+      .catch(() => undefined)
+    throw err
+  }
 }
 
 /** Restores stock for a cancelled order, once. */
@@ -239,6 +426,10 @@ export async function cancelOrder(orderId: string, actorId: string | null, note?
         },
       })
     }
+
+    // A cancelled order gives its coupon use back, so a customer whose order
+    // fell through is not left having spent a single-use code on nothing.
+    await releaseRedemption(tx, orderId)
 
     const updated = await tx.order.update({
       where: { id: orderId },
@@ -280,7 +471,11 @@ export async function updateOrderStatus(
   if (order.status === next) return order
 
   // Cancelling restores stock, so it goes through its own path.
-  if (next === 'CANCELLED') return cancelOrder(orderId, actorId, note)
+  if (next === 'CANCELLED') {
+    const cancelled = await cancelOrder(orderId, actorId, note)
+    emit('ORDER_CANCELLED', { orderId, orderNumber: cancelled.orderNumber })
+    return cancelled
+  }
 
   if (!ALLOWED_TRANSITIONS[order.status].includes(next)) {
     throw new ConflictError(

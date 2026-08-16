@@ -5,10 +5,12 @@ import { prisma } from '../../config/db.js'
 import {
   getPublicProductBySlug,
   getRelatedProducts,
+  listFacets,
   listPublicProducts,
 } from './product.service.js'
 import { publicListQuery, slugParam } from './product.schemas.js'
 import type { PublicListQuery } from './product.schemas.js'
+import { track } from '../analytics/analytics.service.js'
 
 /** Public catalogue. No authentication — browsing is open (spec §21). */
 export const productRouter: Router = Router()
@@ -16,13 +18,32 @@ export const productRouter: Router = Router()
 productRouter.get('/', validate({ query: publicListQuery }), async (req, res) => {
   const q = req.validated!.query as PublicListQuery
   const { products, total } = await listPublicProducts(q)
+
+  if (q.q) {
+    track(req, {
+      type: 'search',
+      properties: { term: q.q, results: total, category: q.category ?? null },
+    })
+  }
+
   return ok(res, { products }, { pagination: pageMeta(q.page, q.perPage, total) })
+})
+
+/**
+ * Filter options for the current result set. Separate from the listing so the
+ * panel can be fetched once and the grid re-fetched as filters change.
+ */
+productRouter.get('/facets', validate({ query: publicListQuery }), async (req, res) => {
+  const q = req.validated!.query as PublicListQuery
+  return ok(res, await listFacets(q))
 })
 
 productRouter.get('/:slug', validate({ params: slugParam }), async (req, res) => {
   const { slug } = req.params as { slug: string }
   const product = await getPublicProductBySlug(slug)
   const related = await getRelatedProducts(product.id, product.category?.id ?? null)
+
+  track(req, { type: 'product.view', entityType: 'Product', entityId: product.id })
 
   return ok(res, { product, related })
 })
