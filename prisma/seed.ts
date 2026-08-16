@@ -79,6 +79,22 @@ const PERMISSIONS = [
 
 const ALL = PERMISSIONS.map((p) => p.key)
 
+/**
+ * Seeded roles, mapped to the separation of duties in PRD §02.
+ *
+ *   Content / Marketing   CMS, promotions, SEO, campaigns
+ *   Operations            orders, fulfilment, shipping, returns
+ *   Support               view context, plus explicitly permitted actions
+ *   Admin / Super Admin   configuration, users, permissions
+ *
+ * Catalogue is separated out as its own role because M02 and M11 name a
+ * merchandiser as a distinct actor from a content manager — a copywriter
+ * scheduling a banner has no business deleting a product or adjusting stock.
+ *
+ * These are defaults, not a fixed set. An admin holding `role.manage` can
+ * create further roles and re-grant any of them at runtime; `isSystem` only
+ * stops them being deleted.
+ */
 const ROLES = [
   {
     key: 'SUPER_ADMIN',
@@ -87,27 +103,55 @@ const ROLES = [
     permissions: ALL,
   },
   {
+    /**
+     * Runs the whole store but cannot grant privileges. That is the single
+     * most valuable separation here: someone who can configure everything
+     * still cannot quietly promote themselves or anyone else.
+     */
+    key: 'ADMIN',
+    name: 'Administrator',
+    description: 'Full store configuration. Cannot manage staff, roles or permissions.',
+    permissions: ALL.filter((key) => !['user.manage', 'role.manage'].includes(key)),
+  },
+  {
     key: 'CATALOG_MANAGER',
     name: 'Catalog Manager',
-    description: 'Products, categories, media, stock and merchandising content.',
+    description: 'Products, categories, options, media and stock.',
     permissions: [
       'dashboard.read', 'product.read', 'product.create', 'product.update',
       'product.delete', 'product.publish', 'category.manage', 'media.upload',
-      'attribute.manage', 'inventory.read', 'inventory.adjust', 'order.read',
-      'coupon.read', 'coupon.manage', 'review.moderate',
-      'content.read', 'content.manage', 'report.read',
+      'attribute.manage', 'inventory.read', 'inventory.adjust',
+      // Sees orders to know what is selling, but cannot act on them.
+      'order.read', 'report.read',
     ],
   },
   {
-    key: 'ORDER_MANAGER',
-    name: 'Order Manager',
-    description: 'Order fulfilment, shipping, returns and customer lookup.',
+    key: 'CONTENT_MARKETING',
+    name: 'Content & Marketing',
+    description: 'Pages, banners, SEO, promotions, reviews and customer messaging.',
     permissions: [
-      'dashboard.read', 'product.read', 'inventory.read', 'order.read',
-      'order.update', 'order.update_status', 'order.cancel', 'shipment.manage',
+      'dashboard.read',
+      // Read-only on the catalogue: needed to target a coupon or a banner at a
+      // product, but not to change or publish one.
+      'product.read', 'media.upload',
+      'content.read', 'content.manage',
+      'coupon.read', 'coupon.manage',
+      'review.moderate', 'message.manage',
+      'report.read',
+    ],
+  },
+  {
+    key: 'OPERATIONS',
+    name: 'Operations',
+    description: 'Orders, fulfilment, shipping, returns and refunds.',
+    permissions: [
+      'dashboard.read', 'product.read', 'inventory.read', 'inventory.adjust',
+      'order.read', 'order.update', 'order.update_status', 'order.cancel',
+      'shipment.manage', 'shipping.manage',
       'return.read', 'return.manage', 'refund.create',
       // Packing slips and courier handovers need the real address and phone.
-      'customer.read', 'customer.read_pii', 'report.read',
+      'customer.read', 'customer.read_pii',
+      'report.read',
     ],
   },
   {
@@ -115,8 +159,12 @@ const ROLES = [
     name: 'Support',
     description: 'Answering customer questions. Reads widely, changes little.',
     permissions: [
-      'dashboard.read', 'product.read', 'order.read', 'order.update',
-      'customer.read', 'return.read', 'coupon.read', 'content.read',
+      'dashboard.read', 'product.read',
+      // "Explicitly permitted support actions": internal notes on an order and
+      // on a customer. Not status changes, not refunds.
+      'order.read', 'order.update',
+      'customer.read', 'customer.update',
+      'return.read', 'coupon.read', 'content.read',
     ],
   },
 ] as const
@@ -246,6 +294,21 @@ async function seedRbac() {
   }
 }
 
+/**
+ * One staff account per seeded role.
+ *
+ * Not decoration: without a user who holds *only* Support, there is no way to
+ * prove that Support is denied a refund. The RBAC suite signs in as each of
+ * these and checks both halves — what the role may do, and what it may not.
+ */
+const STAFF = [
+  { key: 'ADMIN', name: 'Priya Menon', email: 'admin.general@example.com' },
+  { key: 'CATALOG_MANAGER', name: 'Rohan Iyer', email: 'catalog@example.com' },
+  { key: 'CONTENT_MARKETING', name: 'Sana Qureshi', email: 'content@example.com' },
+  { key: 'OPERATIONS', name: 'Vikram Shah', email: 'operations@example.com' },
+  { key: 'SUPPORT', name: 'Neha Kulkarni', email: 'support@example.com' },
+] as const
+
 async function seedUsers() {
   const superAdmin = await prisma.role.findUniqueOrThrow({ where: { key: 'SUPER_ADMIN' } })
 
@@ -260,6 +323,25 @@ async function seedUsers() {
       roles: { create: { roleId: superAdmin.id } },
     },
   })
+
+  // One shared password across the demo staff, from the environment — never
+  // hard-coded, same rule as the admin and customer accounts.
+  const staffHash = await hash(env.STAFF_PASSWORD)
+
+  for (const member of STAFF) {
+    const role = await prisma.role.findUniqueOrThrow({ where: { key: member.key } })
+    await prisma.user.create({
+      data: {
+        name: member.name,
+        email: member.email,
+        passwordHash: staffHash,
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        emailVerified: true,
+        roles: { create: { roleId: role.id } },
+      },
+    })
+  }
 
   const customer = await prisma.user.create({
     data: {
@@ -832,6 +914,14 @@ async function seedMessageTemplates() {
       variables: ['name', 'url', 'expiresInMinutes'],
     },
     {
+      key: 'account.staff_invite',
+      channel: 'EMAIL',
+      name: 'Staff invitation',
+      subject: 'You have been invited to the Prash & Ki admin',
+      body: 'Hello {{name}},\n\n{{invitedBy}} has invited you to the Prash & Ki admin panel.\n\nSet your password using this link, which expires in {{expiresInDays}} days:\n\n{{url}}\n\nIf you were not expecting this, ignore this email — the account cannot be used until the link is opened.',
+      variables: ['name', 'url', 'invitedBy', 'expiresInDays'],
+    },
+    {
       key: 'order.placed',
       channel: 'EMAIL',
       name: 'Order confirmation',
@@ -991,7 +1081,7 @@ async function main() {
   console.log(`  ${PERMISSIONS.length} permissions across ${ROLES.length} roles`)
 
   const { admin } = await seedUsers()
-  console.log('  2 users (1 admin, 1 customer)')
+  console.log(`  ${STAFF.length + 2} users (1 super admin, ${STAFF.length} staff, 1 customer)`)
 
   const categoryIds = await seedCategories()
   console.log(`  ${categoryIds.size + 1} categories`)

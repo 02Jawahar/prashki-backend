@@ -21,6 +21,17 @@ const schema = z.object({
   ACCESS_TOKEN_TTL: z.string().default('15m'),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
+  /**
+   * Admin sessions are deliberately shorter than customer sessions (M10:
+   * "Admin sessions use shorter expiry ... than public sessions").
+   *
+   * A stolen customer session can place an order. A stolen admin session can
+   * empty the catalogue, read every customer's address and issue refunds — so
+   * it gets a fraction of the lifetime.
+   */
+  ADMIN_ACCESS_TOKEN_TTL: z.string().default('10m'),
+  ADMIN_REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(1),
+
   FRONTEND_URL: z.string().url().default('http://localhost:3000'),
 
   /**
@@ -43,6 +54,8 @@ const schema = z.object({
   ADMIN_PASSWORD: z.string().min(8).default('change-me'),
   CUSTOMER_EMAIL: z.string().email().default('customer@example.com'),
   CUSTOMER_PASSWORD: z.string().min(8).default('change-me'),
+  /// Shared by the seeded demo staff, one per role.
+  STAFF_PASSWORD: z.string().min(8).default('change-me'),
 
   PAYMENT_PROVIDER: z.enum(['mock', 'razorpay']).default('mock'),
   RAZORPAY_KEY_ID: z.string().optional(),

@@ -69,7 +69,8 @@ async function issueSession(
       tokenHash: refresh.hash,
       // Reusing the family keeps a rotation chain linked so token reuse is detectable.
       family: family ?? refresh.family,
-      expiresAt: refreshExpiry(),
+      // Admin sessions are shorter — see accessTtl/refreshTtlDays.
+      expiresAt: refreshExpiry(user.role),
       userAgent: req.get('user-agent') ?? null,
       ip: req.ip ?? null,
     },

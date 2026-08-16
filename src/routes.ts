@@ -32,6 +32,12 @@ import { wishlistRouter } from './modules/wishlist/wishlist.routes.js'
 import { adminReviewRouter, reviewRouter } from './modules/reviews/review.routes.js'
 import { adminAttributeRouter } from './modules/attributes/attribute.routes.js'
 import { adminReportRouter } from './modules/reports/report.routes.js'
+import {
+  adminAuditRouter,
+  adminPermissionRouter,
+  adminRoleRouter,
+  adminStaffRouter,
+} from './modules/rbac/rbac.routes.js'
 import { analyticsRouter } from './modules/analytics/analytics.routes.js'
 import {
   adminCustomerRouter,
@@ -132,6 +138,13 @@ adminRouter.use('/messaging', adminMessageRouter)
 adminRouter.use('/reviews', adminReviewRouter)
 adminRouter.use('/attributes', adminAttributeRouter)
 adminRouter.use('/reports', adminReportRouter)
+
+// Access control administration (M10, M24). Each router declares its own
+// permission — `role.manage`, `user.manage`, `audit.read`.
+adminRouter.use('/permissions', adminPermissionRouter)
+adminRouter.use('/roles', adminRoleRouter)
+adminRouter.use('/staff', adminStaffRouter)
+adminRouter.use('/audit', adminAuditRouter)
 adminRouter.use('/customers', adminCustomerRouter)
 adminRouter.use('/settings', adminSettingsRouter)
 

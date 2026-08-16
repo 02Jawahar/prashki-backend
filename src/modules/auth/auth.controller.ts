@@ -18,7 +18,7 @@ export async function registerHandler(req: Request, res: Response) {
   const input = req.validated!.body as RegisterInput
   const { user, tokens } = await authService.register(input, req)
 
-  setAuthCookies(res, tokens.accessToken, tokens.refreshToken)
+  setAuthCookies(res, tokens.accessToken, tokens.refreshToken, user.role)
   // A guest may have been building a cart before signing up (spec §36).
   await mergeGuestCart(req, user.id)
 
@@ -29,7 +29,7 @@ export async function loginHandler(req: Request, res: Response) {
   const input = req.validated!.body as LoginInput
   const { user, tokens } = await authService.login(input, req)
 
-  setAuthCookies(res, tokens.accessToken, tokens.refreshToken)
+  setAuthCookies(res, tokens.accessToken, tokens.refreshToken, user.role)
   await mergeGuestCart(req, user.id)
 
   return ok(res, { user })
@@ -41,7 +41,7 @@ export async function refreshHandler(req: Request, res: Response) {
 
   try {
     const { user, tokens } = await authService.refresh(token, req)
-    setAuthCookies(res, tokens.accessToken, tokens.refreshToken)
+    setAuthCookies(res, tokens.accessToken, tokens.refreshToken, user.role)
     return ok(res, { user })
   } catch (err) {
     // A refresh that fails is a dead session — don't leave stale cookies behind.

@@ -22,10 +22,24 @@ export interface AccessTokenPayload {
   type: 'access'
 }
 
+/**
+ * Session lifetimes, by role.
+ *
+ * Admin sessions are shorter than customer sessions (M10). Everything that
+ * issues or renews a session reads these, so the two never drift apart.
+ */
+export function accessTtl(role: UserRole): string {
+  return role === 'ADMIN' ? env.ADMIN_ACCESS_TOKEN_TTL : env.ACCESS_TOKEN_TTL
+}
+
+export function refreshTtlDays(role: UserRole): number {
+  return role === 'ADMIN' ? env.ADMIN_REFRESH_TOKEN_TTL_DAYS : env.REFRESH_TOKEN_TTL_DAYS
+}
+
 export function signAccessToken(userId: string, role: UserRole): string {
   const payload: AccessTokenPayload = { sub: userId, role, type: 'access' }
   return jwt.sign(payload, env.JWT_ACCESS_SECRET, {
-    expiresIn: env.ACCESS_TOKEN_TTL as jwt.SignOptions['expiresIn'],
+    expiresIn: accessTtl(role) as jwt.SignOptions['expiresIn'],
   })
 }
 
@@ -69,8 +83,8 @@ export function generateOpaqueToken(): { token: string; hash: string } {
   return { token, hash: sha256(token) }
 }
 
-export function refreshExpiry(): Date {
-  return new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000)
+export function refreshExpiry(role: UserRole): Date {
+  return new Date(Date.now() + refreshTtlDays(role) * 24 * 60 * 60 * 1000)
 }
 
 /**
@@ -85,14 +99,25 @@ export const baseCookie = {
   ...(env.COOKIE_DOMAIN ? { domain: env.COOKIE_DOMAIN } : {}),
 } as const
 
-export function setAuthCookies(res: Response, accessToken: string, refreshToken: string) {
+export function setAuthCookies(
+  res: Response,
+  accessToken: string,
+  refreshToken: string,
+  role: UserRole = 'CUSTOMER',
+) {
+  /**
+   * The cookie outlives the access token on purpose — the browser keeps
+   * sending it, the server rejects it, and the client refreshes once. Tying
+   * the cookie to the token's own lifetime would make every expiry look like
+   * a logout.
+   */
   res.cookie(ACCESS_COOKIE, accessToken, {
     ...baseCookie,
-    maxAge: 15 * 60 * 1000,
+    maxAge: refreshTtlDays(role) * 24 * 60 * 60 * 1000,
   })
   res.cookie(REFRESH_COOKIE, refreshToken, {
     ...baseCookie,
-    maxAge: env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+    maxAge: refreshTtlDays(role) * 24 * 60 * 60 * 1000,
   })
 }
 
