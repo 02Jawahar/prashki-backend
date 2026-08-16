@@ -10,6 +10,7 @@ import { recordAudit } from '../../utils/audit.js'
 import { unreadCount } from './notification.service.js'
 import { render, sendMessage } from '../messaging/message.service.js'
 import { env } from '../../config/env.js'
+import { EVENT_KEYS, MESSAGE_EVENTS, findEvent } from '../messaging/catalogue.js'
 
 /**
  * The bell (M16). Every query is scoped to `req.user.id` — there is no path
@@ -177,6 +178,148 @@ adminMessageRouter.get('/templates', requirePermission('message.manage'), async 
   })
   return ok(res, { templates })
 })
+
+/**
+ * The events the store can message about, and which channels each is set to
+ * use (FR-14.1, FR-15.1).
+ *
+ * This is what "choose the channel" means in practice: an active template for
+ * a channel is what makes that channel fire, so this endpoint pairs the event
+ * catalogue with the templates that exist and reports the state of each.
+ *
+ * `available` is what the event is allowed to use — a password reset is email
+ * only on purpose, and the UI should not offer to send a credential over
+ * WhatsApp.
+ */
+adminMessageRouter.get('/events', requirePermission('message.manage'), async (_req, res) => {
+  const templates = await prisma.messageTemplate.findMany({
+    orderBy: [{ key: 'asc' }, { channel: 'asc' }],
+  })
+
+  const events = MESSAGE_EVENTS.map((event) => {
+    const mine = templates.filter((t) => t.key === event.key)
+
+    return {
+      ...event,
+      channels: event.channels.map((channel) => {
+        const template = mine.find((t) => t.channel === channel)
+        return {
+          channel,
+          templateId: template?.id ?? null,
+          /// No template at all — the channel has never been set up.
+          configured: Boolean(template),
+          /// Configured but switched off. The copy survives being turned off.
+          enabled: Boolean(template?.isActive),
+        }
+      }),
+    }
+  })
+
+  /**
+   * Templates whose key is not an event the code emits — usually a leftover
+   * from a renamed event. Surfaced rather than hidden, because an admin
+   * editing one would be polishing copy that can never be sent.
+   */
+  const orphans = templates
+    .filter((t) => !EVENT_KEYS.has(t.key))
+    .map((t) => ({ id: t.id, key: t.key, channel: t.channel }))
+
+  return ok(res, { events, orphans })
+})
+
+/**
+ * Turns a channel on for an event, creating the template if it is the first
+ * time (FR-15.1).
+ *
+ * Separate from the template editor because enabling and writing are different
+ * jobs: this gets a channel working with sensible starter copy, and the editor
+ * is where the wording is settled. Starter copy is derived from the event's
+ * email template where one exists, so a new WhatsApp message begins as the
+ * email rather than as an empty box.
+ */
+const channelSchema = z.object({
+  key: z.string().trim().min(2).max(80),
+  channel: z.enum(CHANNELS),
+  enabled: z.boolean(),
+})
+
+adminMessageRouter.put(
+  '/events/channels',
+  writeLimiter,
+  requirePermission('message.manage'),
+  validate({ body: channelSchema }),
+  async (req, res) => {
+    const { key, channel, enabled } = req.validated!.body as z.infer<typeof channelSchema>
+
+    const event = findEvent(key)
+    if (!event) throw new NotFoundError('Event', 'EVENT_NOT_FOUND')
+
+    if (!event.channels.includes(channel)) {
+      // The allowed list goes in the message, not only the details: the
+      // details are for the UI, and this is the sentence a person reads.
+      throw new ValidationError(
+        `${event.label} cannot be sent over ${channel.toLowerCase()} — it is limited to ${event.channels
+          .map((c) => c.toLowerCase())
+          .join(', ')}`,
+        { code: 'CHANNEL_NOT_ALLOWED', allowed: event.channels },
+      )
+    }
+
+    const existing = await prisma.messageTemplate.findUnique({
+      where: { key_channel: { key, channel } },
+    })
+
+    if (existing) {
+      const template = await prisma.messageTemplate.update({
+        where: { id: existing.id },
+        data: { isActive: enabled },
+      })
+
+      recordAudit({
+        action: enabled ? 'MESSAGE_CHANNEL_ENABLED' : 'MESSAGE_CHANNEL_DISABLED',
+        entityType: 'MessageTemplate',
+        entityId: template.id,
+        metadata: { key, channel },
+        req,
+      })
+
+      return ok(res, { template, created: false })
+    }
+
+    if (!enabled) {
+      // Nothing to turn off, and creating a row just to deactivate it would
+      // leave an empty template behind.
+      return ok(res, { template: null, created: false })
+    }
+
+    const source = await prisma.messageTemplate.findUnique({
+      where: { key_channel: { key, channel: 'EMAIL' } },
+    })
+
+    const template = await prisma.messageTemplate.create({
+      data: {
+        key,
+        channel,
+        name: `${event.label} (${channel.toLowerCase()})`,
+        // WhatsApp and SMS have no subject line.
+        subject: channel === 'EMAIL' ? (source?.subject ?? event.label) : null,
+        body: source?.body ?? `${event.label} — write this message before sending it.`,
+        variables: source?.variables ?? [],
+        isActive: true,
+      },
+    })
+
+    recordAudit({
+      action: 'MESSAGE_CHANNEL_ENABLED',
+      entityType: 'MessageTemplate',
+      entityId: template.id,
+      metadata: { key, channel, createdFrom: source ? 'email template' : 'blank' },
+      req,
+    })
+
+    return created(res, { template, created: true })
+  },
+)
 
 const templateSchema = z.object({
   key: z.string().trim().min(2).max(80),

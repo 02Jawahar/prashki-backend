@@ -1,7 +1,7 @@
 import { prisma } from '../config/db.js'
 import { logger } from '../config/logger.js'
 import { formatPaise } from '../utils/money.js'
-import { sendMessage } from '../modules/messaging/message.service.js'
+import { sendToAllChannels } from '../modules/messaging/message.service.js'
 import { notify, notifyAdmins } from '../modules/notifications/notification.service.js'
 import { on } from './bus.js'
 
@@ -12,19 +12,21 @@ import { on } from './bus.js'
  * notification never involves editing checkout logic. Handlers are isolated by
  * the bus, so a failing email cannot fail an order.
  *
- * Everything outbound goes through `sendMessage`, which resolves the editable
- * template, honours the customer's preferences, and writes a delivery log —
- * so the copy is changeable from admin and "was it sent?" has an answer.
+ * Everything outbound goes through `sendToAllChannels`, which sends on every
+ * channel that has an active template for the event. Handlers name the event,
+ * not the channel: adding WhatsApp to shipping updates is an admin creating a
+ * template, not a deploy. The old shape — an EMAIL call plus an `if (phone)`
+ * WhatsApp call — meant the channel list lived in this file, so a template an
+ * admin created for a channel nothing mentioned would never fire.
  *
  * When this needs retries and durability, these same handlers move behind
  * BullMQ without the emitters changing.
  */
 export function registerEventHandlers(): void {
-  on('USER_REGISTERED', async ({ userId, email, name }) => {
-    await sendMessage({
-      channel: 'EMAIL',
+  on('USER_REGISTERED', async ({ userId, email, name, phone }) => {
+    await sendToAllChannels({
       key: 'account.welcome',
-      recipient: email,
+      contact: { email, phone },
       userId,
       variables: { name },
       entityType: 'User',
@@ -47,27 +49,14 @@ export function registerEventHandlers(): void {
       items: order.items.map((i) => `${i.quantity} × ${i.productNameSnapshot}`).join(', '),
     }
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'order.placed',
-      recipient: order.user.email,
+      contact: { email: order.user.email, phone: order.user.phone },
       userId,
       variables,
       entityType: 'Order',
       entityId: orderId,
     })
-
-    if (order.user.phone) {
-      await sendMessage({
-        channel: 'WHATSAPP',
-        key: 'order.placed',
-        recipient: order.user.phone,
-        userId,
-        variables,
-        entityType: 'Order',
-        entityId: orderId,
-      })
-    }
 
     notify({
       userId,
@@ -93,27 +82,14 @@ export function registerEventHandlers(): void {
 
     const variables = { orderNumber, name: order.user.name, total: formatPaise(total) }
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'order.paid',
-      recipient: order.user.email,
+      contact: { email: order.user.email, phone: order.user.phone },
       userId,
       variables,
       entityType: 'Order',
       entityId: orderId,
     })
-
-    if (order.user.phone) {
-      await sendMessage({
-        channel: 'SMS',
-        key: 'order.paid',
-        recipient: order.user.phone,
-        userId,
-        variables,
-        entityType: 'Order',
-        entityId: orderId,
-      })
-    }
 
     notify({
       userId,
@@ -143,27 +119,14 @@ export function registerEventHandlers(): void {
       trackingUrl: shipment?.trackingUrl ?? '',
     }
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'order.shipped',
-      recipient: order.user.email,
+      contact: { email: order.user.email, phone: order.user.phone },
       userId: order.userId,
       variables,
       entityType: 'Order',
       entityId: orderId,
     })
-
-    if (order.user.phone) {
-      await sendMessage({
-        channel: 'WHATSAPP',
-        key: 'order.shipped',
-        recipient: order.user.phone,
-        userId: order.userId,
-        variables,
-        entityType: 'Order',
-        entityId: orderId,
-      })
-    }
 
     notify({
       userId: order.userId,
@@ -179,10 +142,9 @@ export function registerEventHandlers(): void {
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } })
     if (!order) return
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'order.delivered',
-      recipient: order.user.email,
+      contact: { email: order.user.email, phone: order.user.phone },
       userId: order.userId,
       variables: { orderNumber, name: order.user.name },
       entityType: 'Order',
@@ -237,10 +199,9 @@ export function registerEventHandlers(): void {
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } })
     if (!order) return
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'order.cancelled',
-      recipient: order.user.email,
+      contact: { email: order.user.email, phone: order.user.phone },
       userId: order.userId,
       variables: { orderNumber, name: order.user.name },
       entityType: 'Order',
@@ -264,10 +225,9 @@ export function registerEventHandlers(): void {
 
     const readable = status.toLowerCase().replace(/_/g, ' ')
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'return.updated',
-      recipient: request.user.email,
+      contact: { email: request.user.email, phone: request.user.phone },
       userId,
       variables: {
         name: request.user.name,
@@ -297,10 +257,9 @@ export function registerEventHandlers(): void {
     const user = await prisma.user.findUnique({ where: { id: userId } })
     if (!user) return
 
-    await sendMessage({
-      channel: 'EMAIL',
+    await sendToAllChannels({
       key: 'refund.issued',
-      recipient: user.email,
+      contact: { email: user.email, phone: user.phone },
       userId,
       variables: { name: user.name, orderNumber, amount: formatPaise(amount) },
       entityType: 'Refund',

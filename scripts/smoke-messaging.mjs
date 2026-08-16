@@ -169,6 +169,180 @@ const original = sample ? { subject: sample.subject, body: sample.body } : null
   check('an empty body is refused', r.status === 422, `status ${r.status}`)
 }
 
+// ══════════════════════════════════════ channel routing
+section('M14  Channels are chosen in admin, not in code')
+
+{
+  const r = await call('/admin/messaging/events', { jar: superAdmin })
+  check('the event catalogue loads', r.status === 200, `status ${r.status}`)
+
+  const events = r.json?.data?.events ?? []
+  check('every event the code sends is listed', events.length >= 10, `${events.length} events`)
+  check(
+    'each event reports the state of each channel',
+    events.every((e) =>
+      e.channels.every((c) => typeof c.enabled === 'boolean' && typeof c.configured === 'boolean'),
+    ),
+  )
+
+  const reset = events.find((e) => e.key === 'account.password_reset')
+  check(
+    'a password reset is offered on email only',
+    reset?.channels.length === 1 && reset.channels[0].channel === 'EMAIL',
+    reset?.channels.map((c) => c.channel).join(',') ?? 'none',
+  )
+
+  check('no template is orphaned from its event', (r.json?.data?.orphans ?? []).length === 0)
+}
+
+{
+  // Turning a channel on for the first time has to produce a usable template,
+  // not an empty one an admin has to notice and fill in.
+  //
+  // Whether this is the first time depends on whether the suite has run
+  // before — turning a channel off leaves its copy behind, by design. So the
+  // expectation is read from the current state rather than assumed.
+  const catalogue = await call('/admin/messaging/events', { jar: superAdmin })
+  const firstTime = !(catalogue.json?.data?.events ?? [])
+    .find((e) => e.key === 'order.delivered')
+    ?.channels.find((c) => c.channel === 'WHATSAPP')?.configured
+
+  const r = await call('/admin/messaging/events/channels', {
+    method: 'PUT',
+    jar: superAdmin,
+    body: { key: 'order.delivered', channel: 'WHATSAPP', enabled: true },
+  })
+  check(
+    'a new channel can be switched on',
+    r.status === (firstTime ? 201 : 200),
+    `status ${r.status}${firstTime ? '' : ' (already configured)'}`,
+  )
+  check('it creates the template when there is none', r.json?.data?.created === firstTime)
+  check('the new template has copy in it', (r.json?.data?.template?.body ?? '').length > 20)
+  check(
+    'whatsapp gets no subject line',
+    r.json?.data?.template?.subject === null,
+    String(r.json?.data?.template?.subject),
+  )
+
+  const after = await call('/admin/messaging/events', { jar: superAdmin })
+  const event = (after.json?.data?.events ?? []).find((e) => e.key === 'order.delivered')
+  const whatsapp = event?.channels.find((c) => c.channel === 'WHATSAPP')
+  check('the catalogue reports it as on', whatsapp?.enabled === true)
+}
+
+/**
+ * The claim worth proving: a channel switched on in admin actually sends,
+ * with no deploy.
+ *
+ * Driven through registration rather than an order, because registration is
+ * the one event this suite can trigger from nothing — no cart, no stock, no
+ * legal status transition to satisfy. The customer is created here with a
+ * phone number, so WhatsApp has somewhere to go.
+ */
+{
+  // Unique per run: the delivery log is append-only, so a fixed number would
+  // still carry last run’s message and make the “channel off” check fail.
+  const phone = `+9198${String(Date.now()).slice(-8)}`
+
+  // Off first, so the assertion is about switching it on.
+  await call('/admin/messaging/events/channels', {
+    method: 'PUT', jar: superAdmin,
+    body: { key: 'account.welcome', channel: 'WHATSAPP', enabled: false },
+  })
+
+  const emailOnly = new Jar()
+  const before = `nowhatsapp-${Date.now()}@example.com`
+  await call('/auth/register', {
+    method: 'POST', jar: emailOnly,
+    body: { name: 'Before', email: before, phone, password: 'Before@12345', acceptedTerms: true },
+  })
+  await settle()
+
+  const beforeLogs = await call('/admin/messaging/logs?channel=WHATSAPP', { jar: superAdmin })
+  check(
+    'with the channel off, nothing goes out on it',
+    !(beforeLogs.json?.data?.logs ?? []).some((l) => l.recipient === phone && l.template?.key === 'account.welcome'),
+  )
+
+  // Now switch it on — the only change — and register again.
+  const enabled = await call('/admin/messaging/events/channels', {
+    method: 'PUT', jar: superAdmin,
+    body: { key: 'account.welcome', channel: 'WHATSAPP', enabled: true },
+  })
+  check('WhatsApp is switched on for the welcome', enabled.status === 200 || enabled.status === 201)
+
+  const both = new Jar()
+  const after = `withwhatsapp-${Date.now()}@example.com`
+  await call('/auth/register', {
+    method: 'POST', jar: both,
+    body: { name: 'After', email: after, phone, password: 'After@12345', acceptedTerms: true },
+  })
+  await settle()
+
+  const logs = await call('/admin/messaging/logs?channel=WHATSAPP', { jar: superAdmin })
+  const sent = (logs.json?.data?.logs ?? []).find(
+    (l) => l.template?.key === 'account.welcome' && l.recipient === phone,
+  )
+  check('the newly enabled channel actually sends', Boolean(sent), sent?.recipient ?? 'nothing sent')
+  check('it went to the phone, not the email', sent?.recipient === phone, sent?.recipient ?? 'none')
+
+  // The email must still go out — enabling a channel adds one, it does not
+  // move the message off the one that was already working.
+  const emails = await call('/admin/messaging/logs?channel=EMAIL', { jar: superAdmin })
+  check(
+    'email still goes out alongside it',
+    (emails.json?.data?.logs ?? []).some((l) => l.recipient === after),
+  )
+
+  // Leave the seeded configuration as it was found.
+  await call('/admin/messaging/events/channels', {
+    method: 'PUT', jar: superAdmin,
+    body: { key: 'account.welcome', channel: 'WHATSAPP', enabled: false },
+  })
+}
+
+{
+  const r = await call('/admin/messaging/events/channels', {
+    method: 'PUT',
+    jar: superAdmin,
+    body: { key: 'order.delivered', channel: 'WHATSAPP', enabled: false },
+  })
+  check('a channel can be switched off again', r.status === 200, `status ${r.status}`)
+
+  const after = await call('/admin/messaging/events', { jar: superAdmin })
+  const whatsapp = (after.json?.data?.events ?? [])
+    .find((e) => e.key === 'order.delivered')
+    ?.channels.find((c) => c.channel === 'WHATSAPP')
+  check('it reports as off', whatsapp?.enabled === false)
+  check('but the copy survives being switched off', whatsapp?.configured === true)
+}
+
+{
+  // A reset link over WhatsApp is a credential on a channel it does not belong
+  // on. The API refuses rather than trusting the UI not to offer it.
+  const r = await call('/admin/messaging/events/channels', {
+    method: 'PUT',
+    jar: superAdmin,
+    body: { key: 'account.password_reset', channel: 'WHATSAPP', enabled: true },
+  })
+  check('a channel the event forbids is refused', r.status === 422, `status ${r.status}`)
+  check(
+    'the refusal names the allowed channels',
+    r.json?.error?.code === 'CHANNEL_NOT_ALLOWED' || /email/i.test(r.json?.error?.message ?? ''),
+    r.json?.error?.code ?? 'none',
+  )
+}
+
+{
+  const r = await call('/admin/messaging/events/channels', {
+    method: 'PUT',
+    jar: superAdmin,
+    body: { key: 'not.an.event', channel: 'EMAIL', enabled: true },
+  })
+  check('an unknown event is refused', r.status === 404, `status ${r.status}`)
+}
+
 // ══════════════════════════════════════ preview
 section('M15  A template can be checked before it reaches anyone')
 

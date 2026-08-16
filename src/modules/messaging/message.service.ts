@@ -129,6 +129,78 @@ export async function sendMessage(input: SendInput): Promise<SendResult> {
   }
 }
 
+export interface FanOutInput {
+  /** Template key, e.g. "order.placed". */
+  key: string
+  /** Where the customer can be reached. A missing one skips its channels. */
+  contact: { email?: string | null; phone?: string | null }
+  variables?: Record<string, unknown>
+  userId?: string | null
+  entityType?: string
+  entityId?: string
+}
+
+/** Which contact detail a channel needs. */
+function recipientFor(channel: MessageChannel, contact: FanOutInput['contact']): string | null {
+  return channel === 'EMAIL' ? (contact.email ?? null) : (contact.phone ?? null)
+}
+
+/**
+ * Sends one event on every channel an admin has switched on.
+ *
+ * The active templates *are* the routing table. There is no second table of
+ * channel settings to fall out of step with the copy: a template that exists
+ * and is active means "send this event this way", and turning it off in the
+ * admin turns the channel off. That is the whole answer to "how do I choose
+ * the channel" — add or activate a template for it.
+ *
+ * Handlers used to enumerate channels themselves, which meant enabling
+ * WhatsApp for an event was a code change, and a template created for a
+ * channel no handler mentioned would sit there never firing.
+ *
+ * Returns a result per channel so a caller — or a test — can tell the
+ * difference between "not configured", "customer opted out" and "no phone
+ * number on file".
+ */
+export async function sendToAllChannels(
+  input: FanOutInput,
+): Promise<Record<string, SendResult>> {
+  const templates = await prisma.messageTemplate.findMany({
+    where: { key: input.key, isActive: true },
+    select: { channel: true },
+  })
+
+  if (templates.length === 0) {
+    logger.warn({ key: input.key }, 'Event fired with no active template on any channel')
+    return {}
+  }
+
+  const results: Record<string, SendResult> = {}
+
+  for (const { channel } of templates) {
+    // In-app notices are written by the handler, not sent through a provider.
+    if (channel === 'IN_APP') continue
+
+    const recipient = recipientFor(channel, input.contact)
+    if (!recipient) {
+      results[channel] = { sent: false, reason: 'NO_RECIPIENT' }
+      continue
+    }
+
+    results[channel] = await sendMessage({
+      channel,
+      key: input.key,
+      recipient,
+      variables: input.variables,
+      userId: input.userId,
+      entityType: input.entityType,
+      entityId: input.entityId,
+    })
+  }
+
+  return results
+}
+
 interface DispatchInput {
   recipient: string
   subject: string

@@ -13,7 +13,9 @@ import { logger } from '../config/logger.js'
  * push to BullMQ/Redis instead without touching the emitters.
  */
 export interface EventMap {
-  USER_REGISTERED: { userId: string; email: string; name: string }
+  /// Phone included so channel fan-out can reach WhatsApp and SMS — without it
+  /// a channel switched on in admin silently has nowhere to send.
+  USER_REGISTERED: { userId: string; email: string; name: string; phone: string | null }
   PRODUCT_CREATED: { productId: string; name: string }
   PRODUCT_UPDATED: { productId: string; changes: string[] }
   INVENTORY_UPDATED: { variantId: string; availableStock: number }

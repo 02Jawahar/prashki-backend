@@ -146,7 +146,12 @@ export async function register(
    * events/handlers.ts never runs — it sat there as dead code, and no customer
    * has ever been welcomed.
    */
-  emit('USER_REGISTERED', { userId: user.id, email: user.email, name: user.name })
+  emit('USER_REGISTERED', {
+    userId: user.id,
+    email: user.email,
+    name: user.name,
+    phone: user.phone,
+  })
 
   return { user: toPublicUser(user), tokens: await issueSession(user, req) }
 }
