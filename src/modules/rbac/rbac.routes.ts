@@ -13,6 +13,7 @@ import { generateOpaqueToken } from '../../utils/tokens.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 import { sendMessage } from '../messaging/message.service.js'
+import { replayWebhookEvent } from '../webhooks/webhook.service.js'
 import {
   LOCKED_ROLE_KEY,
   assertCanGrant,
@@ -493,6 +494,93 @@ adminStaffRouter.post(
     recordAudit({ action: 'STAFF_INVITE_RESENT', entityType: 'User', entityId: id, req })
 
     return ok(res, { sent: true, message: `A new invitation has been sent to ${target.email}.` })
+  },
+)
+
+// ─────────────────────────────────────────────── operational failure queue
+
+export const adminWebhookRouter: Router = Router()
+
+const webhookQuery = z.object({
+  status: z.enum(['RECEIVED', 'PROCESSED', 'FAILED', 'SKIPPED']).optional(),
+  provider: z.string().trim().max(60).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  perPage: z.coerce.number().int().min(1).max(100).default(50),
+})
+
+/**
+ * Provider callbacks that did not process (PRD §04: "permanent failures enter
+ * a visible operational queue").
+ *
+ * Without this the rows exist and nobody can see them — which in practice
+ * means a payment webhook that failed leaves an order paid at the gateway and
+ * unpaid in the store, discovered by the customer rather than by us.
+ *
+ * The stuck count is returned alongside so a dashboard can show a badge
+ * without a second query.
+ */
+adminWebhookRouter.get(
+  '/',
+  requirePermission('settings.read'),
+  validate({ query: webhookQuery }),
+  async (req, res) => {
+    const q = req.validated!.query as z.infer<typeof webhookQuery>
+
+    const where: Prisma.WebhookEventWhereInput = {
+      ...(q.status ? { status: q.status } : {}),
+      ...(q.provider ? { provider: { contains: q.provider, mode: 'insensitive' } } : {}),
+    }
+
+    const [total, events, stuck] = await Promise.all([
+      prisma.webhookEvent.count({ where }),
+      prisma.webhookEvent.findMany({
+        where,
+        orderBy: { receivedAt: 'desc' },
+        skip: (q.page - 1) * q.perPage,
+        take: q.perPage,
+      }),
+      // RECEIVED but never processed counts as stuck too — the handler died
+      // partway rather than failing cleanly.
+      prisma.webhookEvent.count({ where: { status: { in: ['FAILED', 'RECEIVED'] } } }),
+    ])
+
+    return ok(res, { events, stuckCount: stuck }, { pagination: pageMeta(q.page, q.perPage, total) })
+  },
+)
+
+/**
+ * Replays one failed callback.
+ *
+ * The stored payload is re-processed rather than re-fetched, because the
+ * provider will not send it again and the payload is what we verified at the
+ * time. Signature verification already happened on receipt — this is a retry
+ * of *our* processing, not a re-acceptance of theirs.
+ */
+adminWebhookRouter.post(
+  '/:id/retry',
+  writeLimiter,
+  requirePermission('settings.update'),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+
+    const event = await prisma.webhookEvent.findUnique({ where: { id } })
+    if (!event) throw new NotFoundError('Webhook event', 'WEBHOOK_EVENT_NOT_FOUND')
+
+    if (event.status === 'PROCESSED') {
+      throw new ConflictError('That callback already processed successfully', 'ALREADY_PROCESSED')
+    }
+
+    const outcome = await replayWebhookEvent(event)
+
+    recordAudit({
+      action: 'WEBHOOK_RETRIED',
+      entityType: 'WebhookEvent',
+      entityId: id,
+      metadata: { provider: event.provider, eventType: event.eventType, outcome: outcome.status },
+      req,
+    })
+
+    return ok(res, outcome)
   },
 )
 

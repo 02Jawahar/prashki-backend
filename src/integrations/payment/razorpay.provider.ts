@@ -145,6 +145,12 @@ export class RazorpayProvider implements PaymentProvider {
       throw new PaymentError('Webhook body is not valid JSON', 'WEBHOOK_MALFORMED')
     }
 
+    return this.normalizeWebhook(body)
+  }
+
+  /** Signature-free half of `parseWebhook`. See the interface for when it applies. */
+  normalizeWebhook(payload: unknown): WebhookEvent {
+    const body = (payload ?? {}) as RazorpayWebhookBody
     const payment = body.payload?.payment?.entity
     const eventType = body.event ?? 'unknown'
 

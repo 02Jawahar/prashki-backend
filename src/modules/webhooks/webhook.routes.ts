@@ -4,8 +4,7 @@ import { prisma } from '../../config/db.js'
 import { logger } from '../../config/logger.js'
 import { getPaymentProvider } from '../../integrations/payment/index.js'
 import { getShippingProvider, type CarrierEvent } from '../../integrations/shipping/index.js'
-import { announcePaid, markOrderPaid, markPaymentFailed } from '../payments/payment.service.js'
-import { applyCarrierEvent } from '../shipments/shipment.service.js'
+import { processCarrierEvent, processPaymentEvent } from './webhook.service.js'
 import { AppError } from '../../utils/errors.js'
 
 /**
@@ -79,88 +78,20 @@ webhookRouter.post('/razorpay', async (req, res) => {
   res.status(200).json({ success: true, data: { received: true } })
 
   // ---- process (after responding) ----
-  void processEvent(event, provider.name).catch((err) =>
-    logger.error({ err, eventId: event.eventId }, 'Webhook processing failed'),
+  void processPaymentEvent(event, provider.name).then(
+    (outcome) => {
+      if (outcome.status === 'FAILED') {
+        // The row is now visible in the admin failure queue, where it can be
+        // retried — this log is the pointer to it, not the only record.
+        logger.error(
+          { eventId: event.eventId, error: outcome.error },
+          'Webhook processing failed — queued for retry',
+        )
+      }
+    },
+    (err) => logger.error({ err, eventId: event.eventId }, 'Webhook processing threw'),
   )
 })
-
-async function processEvent(
-  event: NonNullable<ReturnType<ReturnType<typeof getPaymentProvider>['parseWebhook']>>,
-  providerName: string,
-) {
-  const finish = async (status: 'PROCESSED' | 'FAILED' | 'SKIPPED', error?: string) => {
-    await prisma.webhookEvent.update({
-      where: { provider_eventId: { provider: providerName, eventId: event.eventId } },
-      data: { status, error: error ?? null, processedAt: new Date() },
-    })
-  }
-
-  try {
-    if (event.outcome === 'ignored') {
-      await finish('SKIPPED')
-      return
-    }
-
-    if (!event.providerOrderId) {
-      await finish('SKIPPED', 'No provider order id on the event')
-      return
-    }
-
-    // Match the event back to our order through the payment record.
-    const payment = await prisma.payment.findFirst({
-      where: { providerOrderId: event.providerOrderId },
-      orderBy: { createdAt: 'desc' },
-      include: { order: true },
-    })
-
-    if (!payment) {
-      await finish('FAILED', `No payment found for provider order ${event.providerOrderId}`)
-      return
-    }
-
-    if (event.outcome === 'failed') {
-      await markPaymentFailed({
-        orderId: payment.orderId,
-        providerPaymentId: event.providerPaymentId,
-        reason: `Provider reported ${event.eventType}`,
-        source: 'webhook',
-      })
-      await finish('PROCESSED')
-      return
-    }
-
-    // Guard against a webhook claiming a different amount than we billed.
-    if (typeof event.amount === 'number' && event.amount !== payment.amount) {
-      await finish('FAILED', `Amount mismatch: event ${event.amount} vs payment ${payment.amount}`)
-      logger.error(
-        { eventId: event.eventId, expected: payment.amount, received: event.amount },
-        'Webhook amount mismatch — not marking as paid',
-      )
-      return
-    }
-
-    const outcome = await markOrderPaid({
-      orderId: payment.orderId,
-      providerPaymentId: event.providerPaymentId ?? 'unknown',
-      providerOrderId: event.providerOrderId,
-      source: 'webhook',
-    })
-
-    if (outcome.changed && outcome.order) {
-      announcePaid({
-        id: outcome.order.id,
-        orderNumber: outcome.order.orderNumber,
-        userId: outcome.order.userId,
-        total: outcome.order.total,
-      })
-    }
-
-    await finish('PROCESSED')
-  } catch (err) {
-    await finish('FAILED', err instanceof Error ? err.message : String(err)).catch(() => undefined)
-    throw err
-  }
-}
 
 // ------------------------------------------------------------------ carrier
 
@@ -238,31 +169,3 @@ webhookRouter.post('/shipping', async (req, res) => {
     logger.error({ err, eventId: event.eventId }, 'Carrier webhook processing failed'),
   )
 })
-
-async function processCarrierEvent(event: CarrierEvent, providerKey: string) {
-  const finish = async (status: 'PROCESSED' | 'FAILED' | 'SKIPPED', error?: string) => {
-    await prisma.webhookEvent.update({
-      where: { provider_eventId: { provider: providerKey, eventId: event.eventId } },
-      data: { status, error: error ?? null, processedAt: new Date() },
-    })
-  }
-
-  try {
-    const result = await applyCarrierEvent(event)
-
-    if (!result) {
-      // An event for a parcel we do not know about is not a failure on our
-      // side — it is recorded so it can be reconciled by hand.
-      await finish(
-        'SKIPPED',
-        `No shipment matched ${event.providerShipmentId ?? event.trackingNumber ?? 'the event'}`,
-      )
-      return
-    }
-
-    await finish('PROCESSED')
-  } catch (err) {
-    await finish('FAILED', err instanceof Error ? err.message : String(err)).catch(() => undefined)
-    throw err
-  }
-}

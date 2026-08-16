@@ -76,6 +76,15 @@ export interface PaymentProvider {
   verifyPayment(input: VerifyPaymentInput): Promise<VerifiedPayment>
   /** Verifies a webhook against its signature, using the RAW body bytes. */
   parseWebhook(rawBody: Buffer, signature: string | undefined): WebhookEvent | null
+  /**
+   * Turns an already-verified body into an event, without checking a signature.
+   *
+   * Only for replaying a stored payload from the failure queue: the signature
+   * was checked when the callback arrived and the provider will not send it
+   * again, so there is nothing left to verify. Never call this on anything that
+   * came off the wire.
+   */
+  normalizeWebhook(payload: unknown): WebhookEvent
   /** Sends money back. Never called from a customer-facing route. */
   refund(input: RefundInput): Promise<ProviderRefund>
 }

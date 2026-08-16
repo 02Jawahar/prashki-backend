@@ -37,8 +37,10 @@ import {
   adminPermissionRouter,
   adminRoleRouter,
   adminStaffRouter,
+  adminWebhookRouter,
 } from './modules/rbac/rbac.routes.js'
 import { analyticsRouter } from './modules/analytics/analytics.routes.js'
+import { adminPrivacyRouter, privacyRouter } from './modules/privacy/privacy.routes.js'
 import {
   adminCustomerRouter,
   adminDashboardRouter,
@@ -79,6 +81,7 @@ apiRouter.use('/returns', returnRouter)
 apiRouter.use('/notifications', notificationRouter)
 apiRouter.use('/notification-preferences', preferenceRouter)
 apiRouter.use('/wishlist', wishlistRouter)
+apiRouter.use('/privacy', privacyRouter)
 
 // Authenticated by signature, not by session — see the router for why.
 apiRouter.use('/webhooks', webhookRouter)
@@ -145,7 +148,9 @@ adminRouter.use('/permissions', adminPermissionRouter)
 adminRouter.use('/roles', adminRoleRouter)
 adminRouter.use('/staff', adminStaffRouter)
 adminRouter.use('/audit', adminAuditRouter)
+adminRouter.use('/webhook-events', adminWebhookRouter)
 adminRouter.use('/customers', adminCustomerRouter)
+adminRouter.use('/customers', adminPrivacyRouter)
 adminRouter.use('/settings', adminSettingsRouter)
 
 apiRouter.use('/admin', adminRouter)

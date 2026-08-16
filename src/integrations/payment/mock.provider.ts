@@ -80,7 +80,12 @@ export class MockPaymentProvider implements PaymentProvider {
     const b = Buffer.from(signature ?? '')
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null
 
-    const body = JSON.parse(rawBody.toString('utf-8')) as {
+    return this.normalizeWebhook(JSON.parse(rawBody.toString('utf-8')))
+  }
+
+  /** Signature-free half of `parseWebhook`. See the interface for when it applies. */
+  normalizeWebhook(payload: unknown): WebhookEvent {
+    const body = (payload ?? {}) as {
       id?: string
       event?: string
       providerOrderId?: string

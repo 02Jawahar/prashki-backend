@@ -143,6 +143,12 @@ export class ManualShippingProvider implements ShippingProvider {
       throw new IntegrationError('Carrier webhook body is not valid JSON', 'WEBHOOK_MALFORMED')
     }
 
+    return this.normalizeWebhook(body)
+  }
+
+  /** Signature-free half of `parseWebhook`. See the interface for when it applies. */
+  normalizeWebhook(payload: unknown): CarrierEvent {
+    const body = (payload ?? {}) as CanonicalWebhookBody
     const eventId = body.id ?? body.eventId
     const rawStatus = body.status
     if (!eventId || !rawStatus) {

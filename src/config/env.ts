@@ -90,6 +90,71 @@ const schema = z.object({
   S3_SECRET_KEY: z.string().optional(),
 })
 
+/**
+ * Rules that only apply in production.
+ *
+ * The base schema has to stay permissive enough for local development, where
+ * `change-me` is a perfectly good password. In production it is a way in — so
+ * the placeholders shipped in `.env.example` are rejected at boot rather than
+ * quietly deployed.
+ *
+ * Boot-time is the right place for this: the alternative is discovering it
+ * from an access log.
+ */
+const PLACEHOLDERS = new Set(['change-me', 'changeme', 'password', 'admin', 'secret', ''])
+
+function productionIssues(env: z.infer<typeof schema>): string[] {
+  if (env.NODE_ENV !== 'production') return []
+
+  const issues: string[] = []
+
+  for (const [name, value] of [
+    ['ADMIN_PASSWORD', env.ADMIN_PASSWORD],
+    ['CUSTOMER_PASSWORD', env.CUSTOMER_PASSWORD],
+    ['STAFF_PASSWORD', env.STAFF_PASSWORD],
+  ] as const) {
+    if (PLACEHOLDERS.has(value.trim().toLowerCase())) {
+      issues.push(`${name} is still the placeholder from .env.example`)
+    }
+  }
+
+  // A shared signing key means a refresh token is a valid access token.
+  if (env.JWT_ACCESS_SECRET === env.JWT_REFRESH_SECRET) {
+    issues.push('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different')
+  }
+
+  for (const [name, value] of [
+    ['JWT_ACCESS_SECRET', env.JWT_ACCESS_SECRET],
+    ['JWT_REFRESH_SECRET', env.JWT_REFRESH_SECRET],
+  ] as const) {
+    if (value.length < 32) {
+      issues.push(`${name} should be at least 32 characters in production`)
+    }
+    if (PLACEHOLDERS.has(value.trim().toLowerCase())) {
+      issues.push(`${name} is a placeholder value`)
+    }
+  }
+
+  // Cookies are only sent over HTTPS in production; an http:// frontend means
+  // the browser will drop the session and the login loop looks like a bug.
+  if (env.FRONTEND_URL.startsWith('http://')) {
+    issues.push('FRONTEND_URL must be https:// in production — secure cookies are not sent over http')
+  }
+
+  if (env.PAYMENT_PROVIDER === 'razorpay') {
+    if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
+      issues.push('PAYMENT_PROVIDER=razorpay requires RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET')
+    }
+    if (!env.RAZORPAY_WEBHOOK_SECRET) {
+      issues.push(
+        'RAZORPAY_WEBHOOK_SECRET is required — without it a payment webhook cannot be verified',
+      )
+    }
+  }
+
+  return issues
+}
+
 const parsed = schema.safeParse(process.env)
 
 if (!parsed.success) {
@@ -98,6 +163,15 @@ if (!parsed.success) {
   for (const issue of parsed.error.issues) {
     console.error(`  ${issue.path.join('.')}: ${issue.message}`)
   }
+  process.exit(1)
+}
+
+const unsafe = productionIssues(parsed.data)
+
+if (unsafe.length > 0) {
+  console.error('\nRefusing to start in production:\n')
+  for (const issue of unsafe) console.error(`  • ${issue}`)
+  console.error('\nFix these in the environment and redeploy.\n')
   process.exit(1)
 }
 

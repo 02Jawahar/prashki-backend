@@ -100,4 +100,12 @@ export interface ShippingProvider {
 
   /** Verifies a callback against its signature, using the RAW body bytes. */
   parseWebhook(rawBody: Buffer, signature: string | undefined): CarrierEvent | null
+  /**
+   * Turns an already-verified body into an event, without checking a signature.
+   *
+   * Only for replaying a stored payload from the failure queue — the signature
+   * was checked on arrival and the carrier will not send it again. Never call
+   * this on anything that came off the wire.
+   */
+  normalizeWebhook(payload: unknown): CarrierEvent
 }

@@ -202,7 +202,7 @@ Deploy.
 
 ---
 
-## 4. Seed the first admin
+## 4. Bootstrap the first admin
 
 The database is empty after the first deploy — migrations create the tables but
 add no rows, so there is no admin account and nothing to sign in with.
@@ -210,17 +210,22 @@ add no rows, so there is no admin account and nothing to sign in with.
 Open a terminal on the **backend** container in Dokploy and run:
 
 ```bash
-cd /app && npx tsx prisma/seed.ts
+cd /app && npm run db:bootstrap
 ```
 
-> The seed **wipes and rebuilds** the catalogue. Run it once on first deploy, and
-> never again on a live store — it deletes orders.
-
-If you would rather not seed demo products, create just the admin by running the
-seed and then deleting the demo products through the admin UI.
+That creates the permission catalogue, the six default roles, the default
+settings, and — only if there are no users at all — one Super Admin from
+`ADMIN_EMAIL` / `ADMIN_PASSWORD`. It deletes nothing, and running it twice is
+harmless. Run it after **every** deploy that adds a new permission, so the new
+key exists before the route that checks for it is reachable.
 
 Sign in at `https://shop.example.com/admin` with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 **Change the password immediately** — it was in an environment variable.
+
+> **Never run `prisma/seed.ts` against production.** It builds the demo shop,
+> and it starts by deleting every table — orders included. In production it
+> refuses to run at all unless `ALLOW_DESTRUCTIVE_SEED=yes-delete-everything` is
+> set, which is a value you should not have a reason to type.
 
 ---
 
@@ -289,6 +294,120 @@ COOKIE_DOMAIN=          # leave empty
 `SameSite=none` forces `Secure`, so both sides must be HTTPS. Be aware that
 browsers are progressively restricting third-party cookies, so this arrangement
 is fragile. Sharing a domain is materially better.
+
+---
+
+## Rolling back
+
+Read this before the first production deploy, not during the incident.
+
+### The rule that makes rollback possible
+
+**Code rolls back. Migrations do not.** Reverting a schema change on a live
+database means dropping columns that hold real rows, and a `DROP COLUMN` is not
+recoverable from anything except a backup.
+
+So every migration must be written to work with the *previous* version of the
+code as well as the new one:
+
+- Adding a nullable column, a table, or an index — safe. Old code ignores it.
+- Adding a `NOT NULL` column with a default — safe. Old code ignores it.
+- Renaming or dropping a column, narrowing a type, adding a constraint the old
+  code would violate — **not safe**. Split it across two deploys: deploy the
+  code that stops using the column, then, once that is known good, drop it.
+
+Follow that and rolling back is redeploying the previous image, with the
+database left alone.
+
+### Rolling back the application
+
+In Dokploy, **Deployments** → pick the previous successful deployment →
+**Redeploy**. Do the frontend and the backend separately; they are independent
+services and usually only one is at fault.
+
+Roughly a minute. Nothing is lost, because nothing is being undone in the
+database.
+
+If the previous image is gone, redeploy from the previous commit:
+
+```bash
+git revert <bad-commit>    # not reset — the branch is shared
+git push
+```
+
+### If the bad deploy included a migration
+
+1. **Stop writes first.** Scale the backend to zero replicas in Dokploy. Every
+   second it stays up is more rows written in a shape you are about to change.
+2. Decide which case you are in:
+   - **The migration is additive** (the usual case, and what the rule above
+     exists to guarantee): leave it. Roll the code back and the extra column
+     sits there unused. Clean it up in a later deploy.
+   - **The migration is destructive and you need what it removed**: restore
+     from backup. That is the only route. See below.
+3. Bring the backend back up.
+
+Never hand-edit `_prisma_migrations` to make a migration "un-run". The table
+records what was applied; changing it desynchronises Prisma's view from the
+actual schema, and the next deploy fails in a much more confusing way.
+
+### Restoring from a backup
+
+This loses every order placed since the backup was taken, so it is the last
+option, not the first.
+
+```bash
+# On the database container
+pg_restore --clean --if-exists -U ecommerce -d ecommerce /path/to/backup.dump
+```
+
+Then redeploy the backend at the commit that matches that backup's schema — a
+newer image against an older schema fails on the first query.
+
+**Confirm before you need it:** Dokploy's PostgreSQL backups are not on by
+default. Turn them on, then restore one into a scratch database once and check
+the order count. An untested backup is not a backup.
+
+### A migration that failed part-way
+
+`P3009: migrate found failed migrations` on boot. The migration ran, hit an
+error, and Prisma will not proceed past it.
+
+```bash
+# What actually happened
+psql -U ecommerce -d ecommerce -c \
+  "select migration_name, finished_at, logs from _prisma_migrations \
+   where finished_at is null order by started_at desc limit 5;"
+```
+
+Fix the cause — usually existing rows that violate a new constraint — then:
+
+```bash
+npx prisma migrate resolve --rolled-back <migration_name>
+```
+
+and redeploy. That marks it as not applied so it runs again cleanly. Use
+`--applied` only if you have verified by inspecting the schema that the change
+did in fact land.
+
+### Rolling back settings and content
+
+Store settings, pages and navigation are rows, not code, so a redeploy does not
+touch them. A bad settings change is undone in the admin UI, and
+`/admin/audit` records who changed what and when.
+
+### After any rollback
+
+```bash
+curl https://api.example.com/health
+curl https://api.example.com/api/v1/products
+```
+
+Then check `/admin/webhook-events` for callbacks that failed while the service
+was down. Razorpay retries for a while, but not forever; anything left as
+`FAILED` or `RECEIVED` can be replayed from that page. An order paid at the
+gateway but unpaid in the store is the failure mode a rollback most often
+leaves behind.
 
 ---
 
