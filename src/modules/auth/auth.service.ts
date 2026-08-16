@@ -15,6 +15,7 @@ import { AuthenticationError, ConflictError, ValidationError } from '../../utils
 import { recordAudit } from '../../utils/audit.js'
 import { env } from '../../config/env.js'
 import { sendMessage } from '../messaging/message.service.js'
+import { emit } from '../../events/bus.js'
 import { maskEmail } from '../../utils/pii.js'
 import type { LoginInput, RegisterInput, UpdateProfileInput } from './auth.schemas.js'
 
@@ -136,6 +137,16 @@ export async function register(
   }
 
   recordAudit({ userId: user.id, action: 'USER_REGISTERED', entityType: 'User', entityId: user.id, req })
+
+  /**
+   * The welcome email.
+   *
+   * The audit entry above records that a registration happened; it does not
+   * send anything. Without this emit the `USER_REGISTERED` handler in
+   * events/handlers.ts never runs — it sat there as dead code, and no customer
+   * has ever been welcomed.
+   */
+  emit('USER_REGISTERED', { userId: user.id, email: user.email, name: user.name })
 
   return { user: toPublicUser(user), tokens: await issueSession(user, req) }
 }

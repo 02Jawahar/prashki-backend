@@ -21,7 +21,7 @@
     "db:stop": "tsx scripts/db-stop.ts",
     "db:ping": "tsx scripts/db-ping.ts",
     "setup": "npm run db:push && npm run db:seed",
-    "test:smoke": "node scripts/smoke-auth.mjs && node scripts/smoke-admin.mjs && node scripts/smoke-images.mjs && node scripts/smoke-content.mjs && node scripts/smoke-cart.mjs && node scripts/smoke-checkout.mjs && node scripts/smoke-payments.mjs && node scripts/smoke-shipping.mjs && node scripts/smoke-rbac.mjs && node scripts/smoke-ops.mjs && node scripts/smoke-showcase.mjs && node scripts/smoke-prd.mjs",
+    "test:smoke": "node scripts/smoke-auth.mjs && node scripts/smoke-admin.mjs && node scripts/smoke-images.mjs && node scripts/smoke-content.mjs && node scripts/smoke-cart.mjs && node scripts/smoke-checkout.mjs && node scripts/smoke-payments.mjs && node scripts/smoke-shipping.mjs && node scripts/smoke-rbac.mjs && node scripts/smoke-ops.mjs && node scripts/smoke-showcase.mjs && node scripts/smoke-messaging.mjs && node scripts/smoke-prd.mjs",
     "test:acceptance": "node scripts/acceptance.mjs",
     "db:bootstrap": "tsx prisma/bootstrap.ts"
   },

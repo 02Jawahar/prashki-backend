@@ -105,9 +105,18 @@ export async function markPaymentFailed(input: {
   // The order stays PENDING_PAYMENT so the customer can retry. Stock remains
   // held against it; cancelling is what releases stock.
   logger.info({ orderId: input.orderId, reason: input.reason }, 'Payment failed')
+
+  // The order number is what the customer recognises, so it is looked up here
+  // rather than passed as an empty string for every handler to resolve again.
+  const order = await prisma.order.findUnique({
+    where: { id: input.orderId },
+    select: { orderNumber: true, userId: true },
+  })
+
   emit('ORDER_FAILED', {
     orderId: input.orderId,
-    orderNumber: '',
+    orderNumber: order?.orderNumber ?? '',
+    userId: order?.userId ?? null,
     reason: input.reason,
   })
 }

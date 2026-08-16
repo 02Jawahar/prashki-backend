@@ -19,7 +19,13 @@ export interface EventMap {
   INVENTORY_UPDATED: { variantId: string; availableStock: number }
   ORDER_CREATED: { orderId: string; orderNumber: string; userId: string; total: number }
   ORDER_PAID: { orderId: string; orderNumber: string; userId: string; total: number }
-  ORDER_FAILED: { orderId: string; orderNumber: string; reason: string }
+  ORDER_FAILED: {
+    orderId: string
+    orderNumber: string
+    /// Null only if the order vanished between the failure and the lookup.
+    userId: string | null
+    reason: string
+  }
   ORDER_CANCELLED: { orderId: string; orderNumber: string }
   ORDER_SHIPPED: { orderId: string; orderNumber: string }
   ORDER_DELIVERED: { orderId: string; orderNumber: string }

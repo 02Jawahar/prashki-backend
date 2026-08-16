@@ -199,6 +199,40 @@ export function registerEventHandlers(): void {
     })
   })
 
+  /**
+   * A payment that did not go through.
+   *
+   * The order stays PENDING_PAYMENT and the stock stays held, so the customer
+   * can retry — but only if they know. Left silent, this is the failure that
+   * looks to them like the money vanished, and it arrives in support as "I paid
+   * and got nothing".
+   *
+   * In-app rather than email, deliberately: a payment failure is something you
+   * act on in the next minute, on the page you are already looking at. There is
+   * no `order.failed` email template because a bounced-card notice landing in an
+   * inbox an hour later helps nobody.
+   */
+  on('ORDER_FAILED', async ({ orderId, orderNumber, userId, reason }) => {
+    if (!userId) return
+
+    /**
+     * The reason is written for staff — it carries strings like "Provider
+     * reported payment.failed", which tells a customer nothing and reads like
+     * something broke on our side. It stays in the payment record and the
+     * admin view; what reaches the customer is what they can act on.
+     */
+    logger.info({ orderId, orderNumber, reason }, 'Notifying customer of failed payment')
+
+    notify({
+      userId,
+      type: 'order.payment_failed',
+      title: `Payment for ${orderNumber} did not go through`,
+      body: 'Your order is being held. You can try paying again from your order page.',
+      link: `/account/orders/${orderId}`,
+      severity: 'WARNING',
+    })
+  })
+
   on('ORDER_CANCELLED', async ({ orderId, orderNumber }) => {
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } })
     if (!order) return

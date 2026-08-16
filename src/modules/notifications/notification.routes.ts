@@ -5,9 +5,11 @@ import { validate } from '../../middleware/validate.js'
 import { requireAuth, requirePermission } from '../../middleware/auth.js'
 import { writeLimiter } from '../../middleware/rate-limit.js'
 import { created, ok, pageMeta } from '../../utils/response.js'
-import { NotFoundError } from '../../utils/errors.js'
+import { NotFoundError, ValidationError } from '../../utils/errors.js'
 import { recordAudit } from '../../utils/audit.js'
 import { unreadCount } from './notification.service.js'
+import { render, sendMessage } from '../messaging/message.service.js'
+import { env } from '../../config/env.js'
 
 /**
  * The bell (M16). Every query is scoped to `req.user.id` — there is no path
@@ -221,6 +223,162 @@ adminMessageRouter.put(
     })
 
     return created(res, { template })
+  },
+)
+
+/**
+ * Sample values for a preview.
+ *
+ * Deliberately obvious placeholders rather than realistic-looking data: the
+ * point of a preview is to check the wording and spot an unsubstituted
+ * `{{variable}}`, and a preview full of plausible names invites reading it as
+ * a real message.
+ */
+const SAMPLES: Record<string, string> = {
+  name: 'Priya Sharma',
+  orderNumber: 'ORD-2026-00042',
+  total: '₹12,500.00',
+  amount: '₹12,500.00',
+  itemCount: '2',
+  items: '1 × Amaira Halterneck Column Dress, 1 × Kiran Silk Scarf',
+  trackingNumber: 'TRK123456789',
+  trackingUrl: 'https://example.com/track/TRK123456789',
+  carrier: 'Demo Logistics',
+  url: 'https://example.com/reset/sample-token',
+  expiresInMinutes: '30',
+  returnNumber: 'RET-2026-00007',
+  status: 'Approved',
+  note: 'Refund will follow within 5 working days.',
+  reason: 'Card declined',
+  role: 'Support',
+  inviteUrl: 'https://example.com/invite/sample-token',
+}
+
+function sampleFor(variables: string[], overrides: Record<string, string> = {}) {
+  const values: Record<string, string> = {}
+  for (const key of variables) {
+    // An unknown placeholder shows its own name, so a typo in the template is
+    // visible in the preview rather than rendering as a blank.
+    values[key] = overrides[key] ?? SAMPLES[key] ?? `«${key}»`
+  }
+  return { ...values, ...overrides }
+}
+
+const previewSchema = z.object({
+  key: z.string().trim().min(2).max(80),
+  channel: z.enum(CHANNELS),
+  /** Unsaved edits — preview what is on screen, not what is stored. */
+  subject: z.string().max(300).optional().nullable(),
+  body: z.string().max(20_000).optional(),
+  variables: z.record(z.string(), z.string().max(300)).optional(),
+})
+
+/**
+ * Renders a template without sending it (FR-15.4).
+ *
+ * Takes the subject and body from the request when supplied so an admin can
+ * preview an edit before saving it — previewing only what is already stored
+ * would mean saving to find out, which is how a broken template reaches a
+ * customer.
+ */
+adminMessageRouter.post(
+  '/templates/preview',
+  requirePermission('message.manage'),
+  validate({ body: previewSchema }),
+  async (req, res) => {
+    const input = req.validated!.body as z.infer<typeof previewSchema>
+
+    const template = await prisma.messageTemplate.findUnique({
+      where: { key_channel: { key: input.key, channel: input.channel } },
+    })
+    if (!template) throw new NotFoundError('Template', 'TEMPLATE_NOT_FOUND')
+
+    const subjectSource = input.subject !== undefined ? input.subject : template.subject
+    const bodySource = input.body ?? template.body
+
+    const values = sampleFor(template.variables, input.variables)
+
+    // Placeholders in the template that the template does not declare — the
+    // usual cause of a blank in a live message.
+    const used = [...bodySource.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map((m) => m[1])
+    const undeclared = [...new Set(used)].filter((name) => !template.variables.includes(name))
+
+    return ok(res, {
+      subject: subjectSource ? render(subjectSource, values) : null,
+      body: render(bodySource, values),
+      usedVariables: values,
+      undeclared,
+    })
+  },
+)
+
+const testSendSchema = z.object({
+  key: z.string().trim().min(2).max(80),
+  channel: z.enum(CHANNELS),
+})
+
+/**
+ * Sends a real message through the real pipeline, to the admin themselves.
+ *
+ * The recipient is taken from the session and is not a parameter. An endpoint
+ * that sends templated mail to an arbitrary address is an open relay with a
+ * login, and it would be found: the whole value here is proving the provider
+ * and the template work, which sending to yourself does just as well.
+ *
+ * `userId` is deliberately omitted from the send so a test is not silently
+ * swallowed by the admin's own marketing preferences.
+ */
+adminMessageRouter.post(
+  '/templates/test-send',
+  writeLimiter,
+  requirePermission('message.manage'),
+  validate({ body: testSendSchema }),
+  async (req, res) => {
+    const input = req.validated!.body as z.infer<typeof testSendSchema>
+
+    const template = await prisma.messageTemplate.findUnique({
+      where: { key_channel: { key: input.key, channel: input.channel } },
+    })
+    if (!template) throw new NotFoundError('Template', 'TEMPLATE_NOT_FOUND')
+
+    const me = await prisma.user.findUniqueOrThrow({
+      where: { id: req.user!.id },
+      select: { email: true, phone: true },
+    })
+
+    const recipient = input.channel === 'EMAIL' ? me.email : me.phone
+    if (!recipient) {
+      throw new ValidationError(
+        `Add a phone number to your own account before testing ${input.channel.toLowerCase()}`,
+        { code: 'NO_TEST_RECIPIENT' },
+      )
+    }
+
+    const result = await sendMessage({
+      channel: input.channel,
+      key: input.key,
+      recipient,
+      variables: sampleFor(template.variables),
+      entityType: 'MessageTemplate',
+      entityId: template.id,
+    })
+
+    recordAudit({
+      action: 'MESSAGE_TEST_SENT',
+      entityType: 'MessageTemplate',
+      entityId: template.id,
+      metadata: { key: input.key, channel: input.channel, sent: result.sent },
+      req,
+    })
+
+    return ok(res, {
+      sent: result.sent,
+      reason: result.reason ?? null,
+      recipient,
+      // Which provider actually handled it, so "sent" is not mistaken for
+      // "arrived" when the console provider is still configured.
+      provider: input.channel === 'EMAIL' ? env.EMAIL_PROVIDER : env.SMS_PROVIDER,
+    })
   },
 )
 
