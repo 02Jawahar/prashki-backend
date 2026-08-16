@@ -98,6 +98,43 @@ export async function register(
     },
   })
 
+  /**
+   * Consent is recorded as an append-only fact, with the policy version, the
+   * IP and the moment (FR-05.1). Withdrawing later writes another row rather
+   * than editing this one, so what was agreed and when survives.
+   */
+  await prisma.consent.createMany({
+    data: [
+      {
+        userId: user.id,
+        type: 'terms',
+        granted: true,
+        version: input.policyVersion ?? null,
+        ip: req.ip ?? null,
+        userAgent: req.get('user-agent') ?? null,
+      },
+      {
+        userId: user.id,
+        type: 'marketing.email',
+        granted: input.marketingOptIn,
+        version: input.policyVersion ?? null,
+        ip: req.ip ?? null,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    ],
+  })
+
+  // A refusal has to actually stop the mail, not just be filed.
+  if (!input.marketingOptIn) {
+    await prisma.notificationPreference.createMany({
+      data: [
+        { userId: user.id, channel: 'EMAIL', type: 'marketing.newsletter', enabled: false },
+        { userId: user.id, channel: 'EMAIL', type: 'marketing.offers', enabled: false },
+      ],
+      skipDuplicates: true,
+    })
+  }
+
   recordAudit({ userId: user.id, action: 'USER_REGISTERED', entityType: 'User', entityId: user.id, req })
 
   return { user: toPublicUser(user), tokens: await issueSession(user, req) }

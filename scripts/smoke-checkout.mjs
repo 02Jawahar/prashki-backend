@@ -26,10 +26,30 @@ class Jar {
   header() { return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ') }
 }
 
+/** A CSRF token for calls made without a cookie jar. Fetched once. */
+let sharedCsrf = null
+async function primeCsrf() {
+  const res = await fetch(`${BASE}/`, { headers: { accept: 'application/json' } })
+  const cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('csrf='))
+  return cookie ? cookie.split(';')[0].slice('csrf='.length) : null
+}
 async function call(path, { method = 'GET', body, jar } = {}) {
   const headers = { accept: 'application/json' }
   if (body) headers['content-type'] = 'application/json'
-  if (jar?.header()) headers.cookie = jar.header()
+  // Signed double-submit. The token arrives on the first response and login
+  // is itself a write, so an unsafe request primes one before it goes out —
+  // whether or not this particular call is carrying a cookie jar.
+  const unsafe = method !== 'GET' && method !== 'HEAD'
+  if (unsafe && jar && !jar.cookies.get('csrf')) {
+    jar.absorb(await fetch(`${BASE}/`, { headers: { accept: 'application/json' } }))
+  } else if (unsafe && !jar) {
+    sharedCsrf ??= await primeCsrf()
+  }
+
+  const csrf = jar?.cookies?.get('csrf') ?? (unsafe ? sharedCsrf : null)
+  const cookieHeader = jar?.header() || (csrf ? `csrf=${csrf}` : '')
+  if (cookieHeader) headers.cookie = cookieHeader
+  if (csrf) headers['x-csrf-token'] = csrf
   const res = await fetch(`${BASE}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined })
   jar?.absorb(res)
   return { status: res.status, json: await res.json().catch(() => null) }
@@ -100,7 +120,7 @@ let addressId
 {
   const other = new Jar()
   const email = `buyer_${Date.now()}@example.com`
-  await call('/auth/register', { method: 'POST', jar: other, body: { name: 'Other Buyer', email, password: 'Password@123' } })
+  await call('/auth/register', { method: 'POST', jar: other, body: { name: 'Other Buyer', email, password: 'Password@123', acceptedTerms: true } })
   const r = await call('/orders', { method: 'POST', jar: other, body: { addressId } })
   check("cannot order to another customer's address", r.status === 404 || r.status === 422, `${r.status} ${r.json?.error?.code}`)
 }
@@ -152,7 +172,7 @@ let order
 
   // Someone else's order must not be readable.
   const other = new Jar()
-  await call('/auth/register', { method: 'POST', jar: other, body: { name: 'Nosy', email: `nosy_${Date.now()}@example.com`, password: 'Password@123' } })
+  await call('/auth/register', { method: 'POST', jar: other, body: { name: 'Nosy', email: `nosy_${Date.now()}@example.com`, password: 'Password@123', acceptedTerms: true } })
   const nosy = await call(`/orders/${order.id}`, { jar: other })
   check("another customer cannot read someone else's order", nosy.status === 404, `${nosy.status}`)
 }

@@ -11,6 +11,7 @@ import { emit } from '../../events/bus.js'
 import { createOrderIdempotent, orderDetailInclude, updateOrderStatus } from './order.service.js'
 import { forAdmin, forCustomer } from './order.serializer.js'
 import { maskContact } from '../../utils/pii.js'
+import { sendCsv, toCsv } from '../../utils/csv.js'
 
 /** Customer-facing orders. Every read is scoped to the session's user. */
 export const orderRouter: Router = Router()
@@ -124,9 +125,41 @@ export const adminOrderRouter: Router = Router()
 const adminListQuery = z.object({
   q: z.string().trim().max(120).optional(),
   status: z.enum(['PENDING_PAYMENT', 'PAID', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']).optional(),
+  /** Date and total bounds (FR-08.1). */
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+  minTotal: z.coerce.number().int().min(0).optional(),
+  maxTotal: z.coerce.number().int().min(0).optional(),
   page: z.coerce.number().int().min(1).default(1),
   perPage: z.coerce.number().int().min(1).max(100).default(25),
 })
+
+/** Shared by the list and the export, so both filter identically (FR-20.4). */
+function adminOrderWhere(q: z.infer<typeof adminListQuery>) {
+  return {
+    ...(q.status ? { status: q.status } : {}),
+    ...(q.from || q.to
+      ? { createdAt: { ...(q.from ? { gte: q.from } : {}), ...(q.to ? { lte: q.to } : {}) } }
+      : {}),
+    ...(q.minTotal !== undefined || q.maxTotal !== undefined
+      ? {
+          total: {
+            ...(q.minTotal !== undefined ? { gte: q.minTotal } : {}),
+            ...(q.maxTotal !== undefined ? { lte: q.maxTotal } : {}),
+          },
+        }
+      : {}),
+    ...(q.q
+      ? {
+          OR: [
+            { orderNumber: { contains: q.q, mode: 'insensitive' as const } },
+            { user: { name: { contains: q.q, mode: 'insensitive' as const } } },
+            { user: { email: { contains: q.q, mode: 'insensitive' as const } } },
+          ],
+        }
+      : {}),
+  }
+}
 
 adminOrderRouter.get(
   '/',
@@ -134,19 +167,7 @@ adminOrderRouter.get(
   validate({ query: adminListQuery }),
   async (req, res) => {
     const q = req.validated!.query as z.infer<typeof adminListQuery>
-
-    const where = {
-      ...(q.status ? { status: q.status } : {}),
-      ...(q.q
-        ? {
-            OR: [
-              { orderNumber: { contains: q.q, mode: 'insensitive' as const } },
-              { user: { name: { contains: q.q, mode: 'insensitive' as const } } },
-              { user: { email: { contains: q.q, mode: 'insensitive' as const } } },
-            ],
-          }
-        : {}),
-    }
+    const where = adminOrderWhere(q)
 
     const [total, orders] = await Promise.all([
       prisma.order.count({ where }),
@@ -177,6 +198,77 @@ adminOrderRouter.get(
       },
       { pagination: pageMeta(q.page, q.perPage, total) },
     )
+  },
+)
+
+/**
+ * Export of the current filter (FR-08.6).
+ *
+ * Uses the same WHERE as the list, so what downloads is what was on screen.
+ * Capped rather than streamed: 5,000 rows is a spreadsheet, and anything
+ * beyond that wants a reporting tool, not a browser download. The cap is
+ * reported in the response headers rather than silently truncating.
+ */
+const EXPORT_LIMIT = 5_000
+
+adminOrderRouter.get(
+  '/export',
+  requirePermission('order.read'),
+  validate({ query: adminListQuery }),
+  async (req, res) => {
+    const q = req.validated!.query as z.infer<typeof adminListQuery>
+    const where = adminOrderWhere(q)
+
+    const [total, orders] = await Promise.all([
+      prisma.order.count({ where }),
+      prisma.order.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: EXPORT_LIMIT,
+        include: {
+          user: { select: { name: true, email: true } },
+          _count: { select: { items: true } },
+        },
+      }),
+    ])
+
+    if (total > EXPORT_LIMIT) {
+      res.setHeader('x-export-truncated', 'true')
+      res.setHeader('x-export-total', String(total))
+    }
+
+    // Money is exported in rupees with two decimals — a spreadsheet is read by
+    // people, and paise would be read as a hundredfold error.
+    const rupees = (paise: number) => (paise / 100).toFixed(2)
+
+    const csv = toCsv(orders, [
+      { header: 'Order', value: (o) => o.orderNumber },
+      { header: 'Placed', value: (o) => o.createdAt },
+      { header: 'Status', value: (o) => o.status },
+      { header: 'Customer', value: (o) => o.user.name },
+      // Masked unless the exporter is allowed the real thing — an export is a
+      // file that leaves the building.
+      { header: 'Email', value: (o) => maskContact(o.user, req.user?.permissions).email },
+      { header: 'Items', value: (o) => o._count.items },
+      { header: 'Subtotal', value: (o) => rupees(o.subtotal) },
+      { header: 'Discount', value: (o) => rupees(o.discount) },
+      { header: 'Coupon', value: (o) => o.couponCode },
+      { header: 'Shipping', value: (o) => rupees(o.shipping) },
+      { header: 'Delivery method', value: (o) => o.shippingMethodName },
+      { header: 'Tax', value: (o) => rupees(o.tax) },
+      { header: 'Total', value: (o) => rupees(o.total) },
+      { header: 'Currency', value: (o) => o.currency },
+    ])
+
+    recordAudit({
+      action: 'ORDERS_EXPORTED',
+      entityType: 'Order',
+      entityId: 'bulk',
+      metadata: { rows: orders.length, total, filters: q },
+      req,
+    })
+
+    return sendCsv(res, 'orders', csv)
   },
 )
 

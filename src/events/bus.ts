@@ -23,6 +23,20 @@ export interface EventMap {
   ORDER_CANCELLED: { orderId: string; orderNumber: string }
   ORDER_SHIPPED: { orderId: string; orderNumber: string }
   ORDER_DELIVERED: { orderId: string; orderNumber: string }
+  RETURN_UPDATED: {
+    returnRequestId: string
+    returnNumber: string
+    userId: string
+    status: string
+    note: string | null
+  }
+  REFUND_ISSUED: {
+    refundId: string
+    orderId: string
+    orderNumber: string
+    userId: string
+    amount: number
+  }
 }
 
 export type EventName = keyof EventMap

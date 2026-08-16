@@ -44,10 +44,30 @@ class Jar {
   header() { return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ') }
 }
 
+/** A CSRF token for calls made without a cookie jar. Fetched once. */
+let sharedCsrf = null
+async function primeCsrf() {
+  const res = await fetch(`${BASE}/`, { headers: { accept: 'application/json' } })
+  const cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('csrf='))
+  return cookie ? cookie.split(';')[0].slice('csrf='.length) : null
+}
 async function call(path, { method = 'GET', body, jar, rawBody, headers: extra } = {}) {
   const headers = { accept: 'application/json', ...extra }
   if (body || rawBody) headers['content-type'] = 'application/json'
-  if (jar?.header()) headers.cookie = jar.header()
+  // Signed double-submit. The token arrives on the first response and login
+  // is itself a write, so an unsafe request primes one before it goes out —
+  // whether or not this particular call is carrying a cookie jar.
+  const unsafe = method !== 'GET' && method !== 'HEAD'
+  if (unsafe && jar && !jar.cookies.get('csrf')) {
+    jar.absorb(await fetch(`${BASE}/`, { headers: { accept: 'application/json' } }))
+  } else if (unsafe && !jar) {
+    sharedCsrf ??= await primeCsrf()
+  }
+
+  const csrf = jar?.cookies?.get('csrf') ?? (unsafe ? sharedCsrf : null)
+  const cookieHeader = jar?.header() || (csrf ? `csrf=${csrf}` : '')
+  if (cookieHeader) headers.cookie = cookieHeader
+  if (csrf) headers['x-csrf-token'] = csrf
   const res = await fetch(`${BASE}${path}`, {
     method, headers, body: rawBody ?? (body ? JSON.stringify(body) : undefined),
   })
@@ -139,7 +159,13 @@ step('CUSTOMER — register, then the guest bag survives')
   const email = `acceptance_${stamp.toLowerCase()}@example.com`
   const r = await call('/auth/register', {
     method: 'POST', jar: shopper,
-    body: { name: 'Acceptance Buyer', email, password: 'Password@123', phone: '+919810000123' },
+    body: {
+      name: 'Acceptance Buyer',
+      email,
+      password: 'Password@123',
+      phone: '+919810000123',
+      acceptedTerms: true,
+    },
   })
   check('customer registers', r.status === 201 && r.json?.data?.user?.role === 'CUSTOMER', `${r.status}`)
 

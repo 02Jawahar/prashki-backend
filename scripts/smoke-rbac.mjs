@@ -52,10 +52,30 @@ class Jar {
   header() { return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ') }
 }
 
+/** A CSRF token for calls made without a cookie jar. Fetched once. */
+let sharedCsrf = null
+async function primeCsrf() {
+  const res = await fetch(`${BASE}/`, { headers: { accept: 'application/json' } })
+  const cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('csrf='))
+  return cookie ? cookie.split(';')[0].slice('csrf='.length) : null
+}
 async function call(path, { method = 'GET', body, jar } = {}) {
   const headers = { accept: 'application/json' }
   if (body) headers['content-type'] = 'application/json'
-  if (jar?.header()) headers.cookie = jar.header()
+  // Signed double-submit. The token arrives on the first response and login
+  // is itself a write, so an unsafe request primes one before it goes out —
+  // whether or not this particular call is carrying a cookie jar.
+  const unsafe = method !== 'GET' && method !== 'HEAD'
+  if (unsafe && jar && !jar.cookies.get('csrf')) {
+    jar.absorb(await fetch(`${BASE}/`, { headers: { accept: 'application/json' } }))
+  } else if (unsafe && !jar) {
+    sharedCsrf ??= await primeCsrf()
+  }
+
+  const csrf = jar?.cookies?.get('csrf') ?? (unsafe ? sharedCsrf : null)
+  const cookieHeader = jar?.header() || (csrf ? `csrf=${csrf}` : '')
+  if (cookieHeader) headers.cookie = cookieHeader
+  if (csrf) headers['x-csrf-token'] = csrf
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -484,16 +504,25 @@ section('FR-10.6 / FR-24.6  Immutable audit trail')
 section('M10  Admin sessions are shorter than customer sessions')
 
 {
-  const adminLogin = await fetch(`${BASE}/auth/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(SUPER),
-  })
-  const customerLogin = await fetch(`${BASE}/auth/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(CUSTOMER),
-  })
+  /** Login is a write, so it needs a CSRF pair like any other. */
+  const rawLogin = async (credentials) => {
+    const prime = await fetch(`${BASE}/`, { headers: { accept: 'application/json' } })
+    const cookie = (prime.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('csrf='))
+    const token = cookie.split(';')[0].slice('csrf='.length)
+
+    return fetch(`${BASE}/auth/login`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `csrf=${token}`,
+        'x-csrf-token': token,
+      },
+      body: JSON.stringify(credentials),
+    })
+  }
+
+  const adminLogin = await rawLogin(SUPER)
+  const customerLogin = await rawLogin(CUSTOMER)
 
   const maxAge = (res) => {
     const cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('rt='))
@@ -509,6 +538,81 @@ section('M10  Admin sessions are shorter than customer sessions')
     adminAge !== null && customerAge !== null && adminAge < customerAge,
     `admin ${adminAge}s vs customer ${customerAge}s`,
   )
+}
+
+// ═══════════════════════════════════════════════════════════════════ CSRF
+section('FR-24.3  Cross-site request forgery')
+
+{
+  /** Sends a request with the session cookies but a chosen CSRF header. */
+  const forge = async (path, { csrf, method = 'POST', body = {} } = {}) => {
+    const headers = { accept: 'application/json', 'content-type': 'application/json' }
+    // Every cookie except the CSRF one — a forged request carries the session
+    // because the browser attaches it, but cannot read the token to echo it.
+    const cookies = [...superAdmin.cookies].map(([k, v]) => `${k}=${v}`).join('; ')
+    headers.cookie = cookies
+    if (csrf !== undefined) headers['x-csrf-token'] = csrf
+
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers,
+      // undici refuses a body on GET, and a read does not need one.
+      body: method === 'GET' || method === 'HEAD' ? undefined : JSON.stringify(body),
+    })
+    const text = await res.text()
+    let json = null
+    try { json = text ? JSON.parse(text) : null } catch { /* non-JSON */ }
+    return { status: res.status, json }
+  }
+
+  const real = superAdmin.cookies.get('csrf')
+  check('the API issues a CSRF cookie', typeof real === 'string' && real.includes('.'), real?.slice(0, 12) + '…')
+
+  const missing = await forge('/admin/roles')
+  check(
+    'a write with no CSRF header is refused',
+    missing.status === 403 && missing.json?.error?.details?.reason === 'CSRF_TOKEN_MISSING',
+    `status ${missing.status} ${missing.json?.error?.details?.reason}`,
+  )
+
+  const wrong = await forge('/admin/roles', { csrf: 'not-the-token' })
+  check(
+    'a write with the wrong CSRF header is refused',
+    wrong.status === 403 && wrong.json?.error?.details?.reason === 'CSRF_TOKEN_INVALID',
+    `status ${wrong.status} ${wrong.json?.error?.details?.reason}`,
+  )
+
+  // An attacker who can write cookies from a sibling subdomain still cannot
+  // forge the signature, so a self-consistent pair of their own is refused.
+  const selfMade = 'aaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const injected = await fetch(`${BASE}/admin/roles`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+      cookie: `${[...superAdmin.cookies].filter(([k]) => k !== 'csrf').map(([k, v]) => `${k}=${v}`).join('; ')}; csrf=${selfMade}`,
+      'x-csrf-token': selfMade,
+    },
+    body: JSON.stringify({ name: 'Forged', permissions: [] }),
+  })
+  check(
+    'an unsigned token the attacker made up is refused',
+    injected.status === 403,
+    `status ${injected.status}`,
+  )
+
+  // The real token still works — the guard rejects forgeries, not everything.
+  const genuine = await forge('/admin/roles', {
+    csrf: real,
+    body: { name: `Smoke CSRF ${Date.now()}`, permissions: ['dashboard.read'] },
+  })
+  check('the genuine token is accepted', genuine.status === 201, `status ${genuine.status}`)
+  if (genuine.json?.data?.role?.id) {
+    await call(`/admin/roles/${genuine.json.data.role.id}`, { method: 'DELETE', jar: superAdmin })
+  }
+
+  const read = await forge('/admin/roles', { method: 'GET' })
+  check('reads are not blocked — they change nothing', read.status === 200, `status ${read.status}`)
 }
 
 // ═══════════════════════════════════════════════ the role gate still holds

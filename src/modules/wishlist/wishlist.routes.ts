@@ -49,11 +49,26 @@ function serialize(item: WishlistRow) {
     ? (item.variant.inventory?.availableStock ?? 0) > 0
     : product.variants.some((v) => (v.inventory?.availableStock ?? 0) > 0)
 
+  /**
+   * Move-to-cart needs a variant, and only offers one when there is no choice
+   * to make (FR-18.5): the saved variant if there was one, or the product's
+   * single purchasable variant. Anything with a real choice sends the customer
+   * to the product page rather than picking a size on their behalf.
+   */
+  const purchasable = product.variants.filter((v) => (v.inventory?.availableStock ?? 0) > 0)
+  const addableVariantId =
+    item.variant && (item.variant.inventory?.availableStock ?? 0) > 0
+      ? item.variant.id
+      : !item.variant && purchasable.length === 1
+        ? purchasable[0]!.id
+        : null
+
   return {
     id: item.id,
     addedAt: item.createdAt,
     available: product.status === 'ACTIVE' && (!item.variant || item.variant.status === 'ACTIVE'),
     inStock,
+    addableVariantId,
     price,
     compareAtPrice: product.compareAtPrice,
     discountPercent: discountPercent(price, product.compareAtPrice),

@@ -214,6 +214,75 @@ export function registerEventHandlers(): void {
     })
   })
 
+  /**
+   * Return progress (FR-22.6). Only the states a customer would want to hear
+   * about — the internal steps between them are noise in an inbox.
+   */
+  on('RETURN_UPDATED', async ({ returnRequestId, returnNumber, userId, status, note }) => {
+    const TELL_THE_CUSTOMER = ['APPROVED', 'REJECTED', 'RECEIVED', 'COMPLETED']
+    if (!TELL_THE_CUSTOMER.includes(status)) return
+
+    const request = await prisma.returnRequest.findUnique({
+      where: { id: returnRequestId },
+      include: { user: true, order: { select: { orderNumber: true } } },
+    })
+    if (!request) return
+
+    const readable = status.toLowerCase().replace(/_/g, ' ')
+
+    await sendMessage({
+      channel: 'EMAIL',
+      key: 'return.updated',
+      recipient: request.user.email,
+      userId,
+      variables: {
+        name: request.user.name,
+        returnNumber,
+        orderNumber: request.order.orderNumber,
+        status: readable,
+        // The rejection reason is the note that matters most; fall back to
+        // whatever the operator typed.
+        note: request.rejectionReason ?? note ?? '',
+      },
+      entityType: 'ReturnRequest',
+      entityId: returnRequestId,
+    })
+
+    notify({
+      userId,
+      type: 'return.updated',
+      title: `Return ${returnNumber} is ${readable}`,
+      body: request.rejectionReason ?? note,
+      link: `/account/returns/${returnRequestId}`,
+      severity: status === 'REJECTED' ? 'WARNING' : 'INFO',
+    })
+  })
+
+  /** Money going back is always worth telling someone about (FR-22.6). */
+  on('REFUND_ISSUED', async ({ refundId, orderId, orderNumber, userId, amount }) => {
+    const user = await prisma.user.findUnique({ where: { id: userId } })
+    if (!user) return
+
+    await sendMessage({
+      channel: 'EMAIL',
+      key: 'refund.issued',
+      recipient: user.email,
+      userId,
+      variables: { name: user.name, orderNumber, amount: formatPaise(amount) },
+      entityType: 'Refund',
+      entityId: refundId,
+    })
+
+    notify({
+      userId,
+      type: 'refund.issued',
+      title: `Refund of ${formatPaise(amount)} for ${orderNumber}`,
+      body: 'It usually reaches your account within 5-7 working days.',
+      link: `/account/orders/${orderId}`,
+      severity: 'SUCCESS',
+    })
+  })
+
   on('INVENTORY_UPDATED', async ({ variantId, availableStock }) => {
     const inventory = await prisma.inventory.findUnique({
       where: { variantId },

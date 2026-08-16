@@ -68,12 +68,49 @@ notificationRouter.post('/:id/read', writeLimiter, async (req, res) => {
   return ok(res, { read: true, unread: await unreadCount(req.user!.id) })
 })
 
+/** Undo, for a notification opened by accident (FR-16.3). */
+notificationRouter.post('/:id/unread', writeLimiter, async (req, res) => {
+  const { id } = req.params as { id: string }
+
+  const result = await prisma.notification.updateMany({
+    where: { id, userId: req.user!.id },
+    data: { readAt: null },
+  })
+  if (result.count === 0) throw new NotFoundError('Notification', 'NOTIFICATION_NOT_FOUND')
+
+  return ok(res, { read: false, unread: await unreadCount(req.user!.id) })
+})
+
 notificationRouter.post('/read-all', writeLimiter, async (req, res) => {
   const result = await prisma.notification.updateMany({
     where: { userId: req.user!.id, readAt: null },
     data: { readAt: new Date() },
   })
   return ok(res, { markedRead: result.count, unread: 0 })
+})
+
+/**
+ * Clearing a notification (FR-16.3).
+ *
+ * A real delete rather than a hidden flag: the record has no value once the
+ * recipient has dismissed it, and the audit log is where lasting history
+ * belongs. Scoped by userId, so an id from another account matches nothing.
+ */
+notificationRouter.delete('/:id', writeLimiter, async (req, res) => {
+  const { id } = req.params as { id: string }
+
+  const result = await prisma.notification.deleteMany({ where: { id, userId: req.user!.id } })
+  if (result.count === 0) throw new NotFoundError('Notification', 'NOTIFICATION_NOT_FOUND')
+
+  return ok(res, { cleared: true, unread: await unreadCount(req.user!.id) })
+})
+
+/** Clears everything already read, leaving anything unseen alone. */
+notificationRouter.delete('/', writeLimiter, async (req, res) => {
+  const result = await prisma.notification.deleteMany({
+    where: { userId: req.user!.id, readAt: { not: null } },
+  })
+  return ok(res, { cleared: result.count, unread: await unreadCount(req.user!.id) })
 })
 
 // -------------------------------------------------------------- preferences

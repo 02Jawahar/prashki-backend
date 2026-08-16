@@ -70,3 +70,31 @@ export const mediaLimits = {
   maxFileBytes: MAX_MEDIA_BYTES,
   allowed: [...ALLOWED_MEDIA],
 }
+
+/**
+ * Evidence attached to a return request (FR-22.2).
+ *
+ * Photographs from a phone, so a tighter file count than product imagery but
+ * the same size ceiling — and images only. This is the one uploader a
+ * *customer* can reach, so it stays as narrow as the job allows: no SVG (it
+ * can carry script), no video.
+ */
+const MAX_EVIDENCE_FILES = 4
+
+export const evidenceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_BYTES, files: MAX_EVIDENCE_FILES },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED.has(file.mimetype)) {
+      cb(new ValidationError(`Unsupported image type: ${file.mimetype}. Use JPEG, PNG, WebP or AVIF.`))
+      return
+    }
+    cb(null, true)
+  },
+})
+
+export const evidenceLimits = {
+  maxFileBytes: MAX_FILE_BYTES,
+  maxFiles: MAX_EVIDENCE_FILES,
+  allowed: [...ALLOWED],
+}

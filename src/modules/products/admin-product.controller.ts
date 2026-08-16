@@ -46,6 +46,13 @@ export async function createHandler(req: Request, res: Response) {
         status: input.status,
         featured: input.featured,
         categoryId: input.categoryId ?? null,
+        material: input.material ?? null,
+        careInstructions: input.careInstructions ?? null,
+        seoTitle: input.seoTitle ?? null,
+        seoDescription: input.seoDescription ?? null,
+        seoNoindex: input.seoNoindex ?? false,
+        // Only meaningful alongside SCHEDULED; the job reads it from there.
+        scheduledFor: input.status === 'SCHEDULED' ? (input.scheduledFor ?? null) : null,
         publishedAt: input.status === 'ACTIVE' ? new Date() : null,
       },
     })

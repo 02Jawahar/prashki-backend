@@ -123,5 +123,7 @@ export function toProductDetail(p: ProductDetailRow, { includeInactive = false }
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     publishedAt: p.publishedAt,
+    /// Set with status=SCHEDULED; a job flips it to ACTIVE when this passes.
+    scheduledFor: p.scheduledFor,
   }
 }

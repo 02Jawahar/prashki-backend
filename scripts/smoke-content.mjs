@@ -37,7 +37,20 @@ class Jar {
 async function call(p, { method = 'GET', body, jar, form } = {}) {
   const headers = { accept: 'application/json' }
   if (body) headers['content-type'] = 'application/json'
-  if (jar?.header()) headers.cookie = jar.header()
+  // Signed double-submit. The token arrives on the first response and login
+  // is itself a write, so an unsafe request primes one before it goes out —
+  // whether or not this particular call is carrying a cookie jar.
+  const unsafe = method !== 'GET' && method !== 'HEAD'
+  if (unsafe && jar && !jar.cookies.get('csrf')) {
+    jar.absorb(await fetch(`${BASE}/`, { headers: { accept: 'application/json' } }))
+  } else if (unsafe && !jar) {
+    sharedCsrf ??= await primeCsrf()
+  }
+
+  const csrf = jar?.cookies?.get('csrf') ?? (unsafe ? sharedCsrf : null)
+  const cookieHeader = jar?.header() || (csrf ? `csrf=${csrf}` : '')
+  if (cookieHeader) headers.cookie = cookieHeader
+  if (csrf) headers['x-csrf-token'] = csrf
   const res = await fetch(`${BASE}${p}`, { method, headers, body: form ?? (body ? JSON.stringify(body) : undefined) })
   jar?.absorb(res)
   return { status: res.status, json: await res.json().catch(() => null) }

@@ -5,6 +5,7 @@ import { prisma, setDatabaseUrl } from './config/db.js'
 import { ensureDatabase, waitForDatabase } from './config/embedded-db.js'
 import { registerEventHandlers } from './events/handlers.js'
 import { assertShippingConfigured } from './integrations/shipping/index.js'
+import { startScheduler, stopScheduler } from './jobs/scheduler.js'
 
 // In development the API owns the database lifecycle, so `npm run dev` is the
 // only command needed. In production DATABASE_URL is used as-is.
@@ -34,6 +35,9 @@ try {
 // Subscribe side effects (email, SMS) to business events before serving.
 registerEventHandlers()
 
+// Flips SCHEDULED products and pages to live once their moment passes.
+startScheduler()
+
 const app = createApp()
 
 const server = app.listen(env.PORT, () => {
@@ -46,6 +50,8 @@ async function shutdown(signal: string) {
   if (shuttingDown) return
   shuttingDown = true
   logger.info(`${signal} received — shutting down`)
+
+  stopScheduler()
 
   server.close(async () => {
     await prisma.$disconnect()

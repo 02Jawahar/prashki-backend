@@ -297,6 +297,11 @@ adminCustomerRouter.get('/:id', requirePermission('customer.read'), async (req, 
         orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
         include: { author: { select: { id: true, name: true } } },
       },
+      /**
+       * Consent history (FR-12.2). Append-only, so the newest row per type is
+       * the current answer and the rest is the trail of how it got there.
+       */
+      consents: { orderBy: { createdAt: 'desc' }, take: 50 },
     },
   })
 
@@ -311,10 +316,22 @@ adminCustomerRouter.get('/:id', requirePermission('customer.read'), async (req, 
     _sum: { total: true },
   })
 
+  // The current answer per consent type, derived from the newest row.
+  const currentConsents = new Map<string, (typeof customer.consents)[number]>()
+  for (const consent of customer.consents) {
+    if (!currentConsents.has(consent.type)) currentConsents.set(consent.type, consent)
+  }
+
   return ok(res, {
     customer: {
       ...maskContact(customer, req.user?.permissions),
       totalSpend: spend._sum.total ?? 0,
+      consent: [...currentConsents.values()].map((entry) => ({
+        type: entry.type,
+        granted: entry.granted,
+        version: entry.version,
+        recordedAt: entry.createdAt,
+      })),
     },
   })
 })

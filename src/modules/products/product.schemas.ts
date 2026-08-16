@@ -75,6 +75,19 @@ const sku = z
 /** Money arrives as paise and must be a whole number (spec §10). */
 const paise = z.coerce.number().int('Price must be a whole number of paise').min(0)
 
+/**
+ * Editorial and SEO fields, shared by create and update (FR-11.1, FR-03.1).
+ * All optional — an empty override means "fall back to the product's own copy".
+ */
+const editorialFields = {
+  material: z.string().trim().max(500).nullable().optional(),
+  careInstructions: z.string().trim().max(2000).nullable().optional(),
+  seoTitle: z.string().trim().max(200).nullable().optional(),
+  seoDescription: z.string().trim().max(400).nullable().optional(),
+  seoNoindex: z.boolean().optional(),
+  scheduledFor: z.coerce.date().nullable().optional(),
+}
+
 export const createProductSchema = z
   .object({
     name: z.string().trim().min(2).max(200),
@@ -87,6 +100,7 @@ export const createProductSchema = z
     status: z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'INACTIVE', 'ARCHIVED']).default('DRAFT'),
     featured: z.boolean().default(false),
     categoryId: z.string().trim().min(1).nullable().optional(),
+    ...editorialFields,
     variants: z
       .array(
         z.object({
@@ -117,6 +131,7 @@ export const updateProductSchema = z
     status: z.enum(['DRAFT', 'SCHEDULED', 'ACTIVE', 'INACTIVE', 'ARCHIVED']).optional(),
     featured: z.boolean().optional(),
     categoryId: z.string().trim().min(1).nullable().optional(),
+    ...editorialFields,
   })
   .refine(
     (d) => d.compareAtPrice == null || d.price == null || d.compareAtPrice > d.price,

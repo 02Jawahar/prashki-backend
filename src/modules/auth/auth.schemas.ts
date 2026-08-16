@@ -21,6 +21,21 @@ export const registerSchema = z.object({
     .regex(/^\+?[0-9\s-]{7,20}$/, 'Enter a valid phone number')
     .optional()
     .or(z.literal('')),
+
+  /**
+   * Consent capture (FR-05.1).
+   *
+   * Accepting the terms is required — you cannot hold an account without
+   * agreeing to them. Marketing is separate and defaults to false: consent
+   * that was never actively given is not consent, and a pre-ticked box is
+   * exactly what the DPDP Act is written against.
+   */
+  acceptedTerms: z.literal(true, {
+    errorMap: () => ({ message: 'Please accept the terms to create an account' }),
+  }),
+  marketingOptIn: z.boolean().default(false),
+  /** The policy version shown at the time, so the record stays meaningful. */
+  policyVersion: z.string().trim().max(40).optional(),
 })
 
 export const loginSchema = z.object({
