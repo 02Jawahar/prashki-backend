@@ -4,6 +4,7 @@ import { logger } from './config/logger.js'
 import { prisma, setDatabaseUrl } from './config/db.js'
 import { ensureDatabase, waitForDatabase } from './config/embedded-db.js'
 import { registerEventHandlers } from './events/handlers.js'
+import { assertConsoleEmailIsSafe } from './integrations/notifications/index.js'
 import { assertShippingConfigured } from './integrations/shipping/index.js'
 import { startScheduler, stopScheduler } from './jobs/scheduler.js'
 
@@ -34,6 +35,9 @@ try {
 
 // Subscribe side effects (email, SMS) to business events before serving.
 registerEventHandlers()
+
+// Says so at boot if production is not actually delivering mail.
+assertConsoleEmailIsSafe()
 
 // Flips SCHEDULED products and pages to live once their moment passes.
 startScheduler()
