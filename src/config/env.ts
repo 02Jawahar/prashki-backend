@@ -73,8 +73,23 @@ const schema = z.object({
    */
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
-  SMTP_USER: z.string().optional(),
-  SMTP_PASSWORD: z.string().optional(),
+  SMTP_USER: z.string().trim().optional(),
+  /**
+   * Google shows an app password as four groups of four — "msty biow ihan
+   * aemh" — because it is easier to read that way. The password is the sixteen
+   * characters; the spaces are presentation. Pasted verbatim it authenticates
+   * as a nineteen-character string and Gmail rejects it, which reads as a
+   * wrong password when the credential is perfectly good.
+   *
+   * Only that exact shape is collapsed. Another provider's key with a real
+   * space in it is left alone.
+   */
+  SMTP_PASSWORD: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value && /^(\w{4}\s){3}\w{4}$/.test(value.trim()) ? value.replace(/\s+/g, '') : value,
+    ),
   /**
    * Implicit TLS from the first byte (port 465). Port 587 uses STARTTLS, which
    * is negotiated on a plain connection, so this stays false there — setting
