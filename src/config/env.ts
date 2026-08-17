@@ -62,9 +62,28 @@ const schema = z.object({
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
 
-  EMAIL_PROVIDER: z.enum(['console', 'resend', 'sendgrid', 'ses']).default('console'),
+  EMAIL_PROVIDER: z.enum(['console', 'smtp', 'resend', 'sendgrid', 'ses']).default('console'),
   EMAIL_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default('orders@example.com'),
+
+  /**
+   * SMTP, which every mail service speaks — Brevo, Resend, Mailtrap, Gmail,
+   * Amazon SES. One adapter rather than one per vendor, so changing provider
+   * is four environment variables and no deploy of new code.
+   */
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  /**
+   * Implicit TLS from the first byte (port 465). Port 587 uses STARTTLS, which
+   * is negotiated on a plain connection, so this stays false there — setting
+   * it wrong is the usual reason a working password appears to be rejected.
+   */
+  SMTP_SECURE: z
+    .enum(['true', 'false'])
+    .transform((v) => v === 'true')
+    .default('false'),
 
   SMS_PROVIDER: z.enum(['noop', 'msg91', 'twilio']).default('noop'),
   WHATSAPP_PROVIDER: z.enum(['noop', 'meta', 'twilio']).default('noop'),
@@ -139,6 +158,33 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
   // the browser will drop the session and the login loop looks like a bug.
   if (env.FRONTEND_URL.startsWith('http://')) {
     issues.push('FRONTEND_URL must be https:// in production — secure cookies are not sent over http')
+  }
+
+  /**
+   * A half-configured mail provider is worse than none: the store looks like
+   * it is sending, and every order confirmation fails at the moment it
+   * matters. Checked here so it surfaces on deploy, not on the first sale.
+   */
+  if (env.EMAIL_PROVIDER === 'smtp') {
+    const missing = (
+      [
+        ['SMTP_HOST', env.SMTP_HOST],
+        ['SMTP_USER', env.SMTP_USER],
+        ['SMTP_PASSWORD', env.SMTP_PASSWORD],
+      ] as const
+    )
+      .filter(([, value]) => !value)
+      .map(([name]) => name)
+
+    if (missing.length > 0) {
+      issues.push(`EMAIL_PROVIDER=smtp requires ${missing.join(', ')}`)
+    }
+
+    // Most services reject a From address on a domain you have not verified,
+    // and the placeholder is the one nobody remembers to change.
+    if (env.EMAIL_FROM.includes('example.com')) {
+      issues.push('EMAIL_FROM is still a placeholder — set it to an address on a domain you control')
+    }
   }
 
   if (env.PAYMENT_PROVIDER === 'razorpay') {

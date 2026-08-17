@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 
@@ -85,6 +86,53 @@ class NoopWhatsAppProvider implements WhatsAppProvider {
 }
 
 /**
+ * Real delivery over SMTP.
+ *
+ * SMTP rather than a vendor SDK because every service speaks it — Brevo,
+ * Resend, Mailtrap, Gmail, SES — so switching provider is four environment
+ * variables instead of a new adapter and a deploy. A vendor SDK buys webhooks
+ * and analytics that this store does not use yet.
+ *
+ * The transport is created once and reused: nodemailer pools connections, and
+ * building one per message means a TLS handshake per email.
+ */
+class SmtpEmailProvider implements EmailProvider {
+  readonly name = 'smtp'
+
+  private transport = nodemailer.createTransport({
+    host: env.SMTP_HOST,
+    port: env.SMTP_PORT,
+    // True only for implicit TLS on 465; 587 negotiates STARTTLS instead.
+    secure: env.SMTP_SECURE,
+    auth: { user: env.SMTP_USER!, pass: env.SMTP_PASSWORD! },
+  })
+
+  async send(message: EmailMessage): Promise<void> {
+    const body = typeof message.data?.body === 'string' ? message.data.body : ''
+
+    await this.transport.sendMail({
+      from: env.EMAIL_FROM,
+      to: message.to,
+      subject: message.subject,
+      /**
+       * Plain text only. The templates are written as plain text, and
+       * generating HTML by wrapping them in <pre> would look worse than
+       * letting the client render text — HTML templates are a design job, not
+       * a transport one.
+       */
+      text: body,
+    })
+
+    logger.info({ to: message.to, template: message.template }, 'Email sent')
+  }
+
+  /** Proves the credentials before a customer's order depends on them. */
+  async verify(): Promise<void> {
+    await this.transport.verify()
+  }
+}
+
+/**
  * Named but unimplemented providers fail loudly rather than silently dropping
  * a customer's order confirmation.
  */
@@ -125,11 +173,39 @@ export function assertConsoleEmailIsSafe(): void {
 let emailProvider: EmailProvider | null = null
 
 export function getEmailProvider(): EmailProvider {
-  emailProvider ??=
+  if (emailProvider) return emailProvider
+
+  emailProvider =
     env.EMAIL_PROVIDER === 'console'
       ? new ConsoleEmailProvider()
-      : new UnimplementedEmailProvider(env.EMAIL_PROVIDER)
+      : env.EMAIL_PROVIDER === 'smtp'
+        ? new SmtpEmailProvider()
+        : new UnimplementedEmailProvider(env.EMAIL_PROVIDER)
+
   return emailProvider
+}
+
+/**
+ * Checks the SMTP credentials at boot.
+ *
+ * Deliberately not fatal. Mail is a side effect: a mail server that is down,
+ * or a password that expired overnight, must not stop the store taking orders.
+ * But it should be in the log the moment it happens rather than discovered
+ * from a customer who never got their confirmation.
+ */
+export async function verifyEmailProvider(): Promise<void> {
+  const provider = getEmailProvider()
+  if (!(provider instanceof SmtpEmailProvider)) return
+
+  try {
+    await provider.verify()
+    logger.info({ host: env.SMTP_HOST, port: env.SMTP_PORT, from: env.EMAIL_FROM }, 'SMTP ready')
+  } catch (err) {
+    logger.error(
+      { err, host: env.SMTP_HOST, port: env.SMTP_PORT },
+      'SMTP credentials rejected — no email will be delivered until this is fixed',
+    )
+  }
 }
 
 export function getSmsProvider(): SmsProvider {
