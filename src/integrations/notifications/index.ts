@@ -197,6 +197,23 @@ export async function verifyEmailProvider(): Promise<void> {
   const provider = getEmailProvider()
   if (!(provider instanceof SmtpEmailProvider)) return
 
+  /**
+   * Gmail rewrites the From header to the authenticated account unless the
+   * address is a verified "Send mail as" alias. Configure orders@yourdomain
+   * and customers still see a personal Gmail address — with nothing in any log
+   * to say why, because the send genuinely succeeded.
+   */
+  const host = (env.SMTP_HOST ?? '').toLowerCase()
+  const isGmail = host.endsWith('gmail.com') || host.endsWith('googlemail.com')
+
+  if (isGmail && env.SMTP_USER && env.EMAIL_FROM.toLowerCase() !== env.SMTP_USER.toLowerCase()) {
+    logger.warn(
+      { from: env.EMAIL_FROM, account: env.SMTP_USER },
+      `Gmail will replace the From address with ${env.SMTP_USER} unless "${env.EMAIL_FROM}" ` +
+        'is a verified alias on that account. Customers will see the Gmail address.',
+    )
+  }
+
   try {
     await provider.verify()
     logger.info({ host: env.SMTP_HOST, port: env.SMTP_PORT, from: env.EMAIL_FROM }, 'SMTP ready')
