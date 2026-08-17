@@ -18,7 +18,7 @@
 import { PrismaClient, Prisma } from '@prisma/client'
 import { hash } from '@node-rs/argon2'
 import { env } from '../src/config/env.js'
-import { PERMISSIONS, ROLES, DEFAULT_SETTINGS } from './seed-data.js'
+import { PERMISSIONS, ROLES, DEFAULT_SETTINGS, MESSAGE_TEMPLATES } from './seed-data.js'
 
 const prisma = new PrismaClient({ datasources: { db: { url: env.DATABASE_URL } } })
 
@@ -101,6 +101,45 @@ async function syncRoles(): Promise<{ created: number; updated: number }> {
   return { created, updated }
 }
 
+/**
+ * Creates any message template the store does not have yet.
+ *
+ * Not demo data. `sendMessage` looks the template up by (key, channel) and
+ * returns without sending if there is none — so a store with correct SMTP
+ * credentials still delivers nothing, and the delivery log stays empty
+ * because a message that was never attempted has nothing to log. That is
+ * exactly how it failed in production: `SMTP ready` at boot, and every
+ * invitation answered with "No active message template".
+ *
+ * Existing rows are never touched. Once an admin has edited the wording, that
+ * is the store's copy and a later deploy must not overwrite it.
+ */
+async function syncTemplates(): Promise<number> {
+  let added = 0
+
+  for (const template of MESSAGE_TEMPLATES) {
+    const existing = await prisma.messageTemplate.findUnique({
+      where: { key_channel: { key: template.key, channel: template.channel } },
+    })
+    if (existing) continue
+
+    await prisma.messageTemplate.create({
+      data: {
+        key: template.key,
+        channel: template.channel,
+        name: template.name,
+        subject: template.subject ?? null,
+        body: template.body,
+        variables: template.variables,
+        isActive: true,
+      },
+    })
+    added++
+  }
+
+  return added
+}
+
 async function syncSettings(): Promise<number> {
   let added = 0
 
@@ -155,6 +194,9 @@ async function main() {
   console.log(
     `  ${roles.created} roles created${roles.updated > 0 ? `, Super Admin topped up` : ''}`,
   )
+
+  const templates = await syncTemplates()
+  console.log(`  ${templates} message templates added${templates === 0 ? ' (already present)' : ''}`)
 
   const settings = await syncSettings()
   console.log(`  ${settings} settings added${settings === 0 ? ' (already configured)' : ''}`)
