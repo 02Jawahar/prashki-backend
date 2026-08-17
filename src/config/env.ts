@@ -202,6 +202,40 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
     }
   }
 
+  /**
+   * Object storage, checked for the same reason as mail: a half-configured
+   * bucket looks fine until the first product photo, and by then someone is
+   * mid-upload wondering why the form failed.
+   */
+  if (env.STORAGE_PROVIDER === 's3' || env.STORAGE_PROVIDER === 'r2') {
+    const missing = (
+      [
+        ['S3_ENDPOINT', env.S3_ENDPOINT],
+        ['S3_BUCKET', env.S3_BUCKET],
+        ['S3_ACCESS_KEY', env.S3_ACCESS_KEY],
+        ['S3_SECRET_KEY', env.S3_SECRET_KEY],
+      ] as const
+    )
+      .filter(([, value]) => !value)
+      .map(([name]) => name)
+
+    if (missing.length > 0) {
+      issues.push(`STORAGE_PROVIDER=${env.STORAGE_PROVIDER} requires ${missing.join(', ')}`)
+    }
+  }
+
+  /**
+   * Image URLs are written into the database at upload time and never
+   * recomputed, so a placeholder here is not a cosmetic problem — every
+   * product photo gets a permanently broken address on a domain nobody owns,
+   * and fixing it later means rewriting rows.
+   */
+  if (env.STORAGE_PUBLIC_URL.includes('example.com')) {
+    issues.push(
+      'STORAGE_PUBLIC_URL is still a placeholder — image URLs are stored permanently, so fix it before uploading anything',
+    )
+  }
+
   if (env.PAYMENT_PROVIDER === 'razorpay') {
     if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
       issues.push('PAYMENT_PROVIDER=razorpay requires RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET')

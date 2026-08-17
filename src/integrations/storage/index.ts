@@ -1,33 +1,10 @@
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 import { LocalStorageProvider } from './local.provider.js'
+import { S3StorageProvider } from './s3.provider.js'
 import type { StorageProvider } from './storage.types.js'
 
 export type { StorageProvider, StoredFile, PutFileInput } from './storage.types.js'
-
-/**
- * S3 and R2 are API-compatible, so one provider covers both — it needs only an
- * endpoint and credentials. Left unimplemented deliberately: shipping an
- * untested S3 path would be worse than a clear error at boot.
- */
-class UnimplementedProvider implements StorageProvider {
-  constructor(readonly name: string) {}
-  private fail(): never {
-    throw new Error(
-      `STORAGE_PROVIDER=${this.name} is declared but not implemented yet. ` +
-        `Implement it against the StorageProvider interface, or set STORAGE_PROVIDER=local.`,
-    )
-  }
-  put(): never {
-    this.fail()
-  }
-  delete(): never {
-    this.fail()
-  }
-  urlFor(): never {
-    this.fail()
-  }
-}
 
 let provider: StorageProvider | null = null
 
@@ -35,17 +12,26 @@ export function getStorage(): StorageProvider {
   if (provider) return provider
 
   switch (env.STORAGE_PROVIDER) {
-    case 'local':
-      provider = new LocalStorageProvider()
-      break
+    /**
+     * S3 and R2 are the same protocol, and Garage and MinIO implement it too,
+     * so one provider covers all of them. Which one you are talking to is four
+     * environment variables, not four code paths.
+     */
     case 's3':
     case 'r2':
-      provider = new UnimplementedProvider(env.STORAGE_PROVIDER)
+      provider = new S3StorageProvider()
+      logger.info(
+        { endpoint: env.S3_ENDPOINT, bucket: env.S3_BUCKET, publicUrl: env.STORAGE_PUBLIC_URL },
+        'Storage: S3-compatible',
+      )
       break
+
+    case 'local':
     default:
       provider = new LocalStorageProvider()
+      logger.info({ dir: env.STORAGE_LOCAL_DIR }, 'Storage: local disk')
+      break
   }
 
-  logger.debug(`Storage provider: ${provider.name}`)
   return provider
 }

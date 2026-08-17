@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
+import { buildKey } from './keys.js'
 import type { PutFileInput, StorageProvider, StoredFile } from './storage.types.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -18,8 +19,7 @@ export class LocalStorageProvider implements StorageProvider {
   }
 
   async put({ folder, filename, contentType, body }: PutFileInput): Promise<StoredFile> {
-    const safeFolder = sanitiseSegment(folder)
-    const key = `${safeFolder}/${uniqueName(filename)}`
+    const key = buildKey(folder, filename)
     const target = path.join(ROOT, key)
 
     // Defence in depth: a crafted filename must never escape the storage root.
@@ -44,20 +44,4 @@ export class LocalStorageProvider implements StorageProvider {
       }
     }
   }
-}
-
-function sanitiseSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'misc'
-}
-
-function uniqueName(original: string): string {
-  const ext = path.extname(original).toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10)
-  const stem = path
-    .basename(original, path.extname(original))
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60)
-
-  return `${stem || 'file'}-${crypto.randomBytes(6).toString('hex')}${ext || '.bin'}`
 }
