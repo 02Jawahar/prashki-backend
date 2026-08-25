@@ -11,6 +11,8 @@ import { loadCart, serializeCart } from '../cart/cart.serializer.js'
 import { resolveCart } from '../cart/cart.service.js'
 import {
   getShippingProvider,
+  isRegisteredProvider,
+  listShippingProviders,
   type ServiceabilityResult,
 } from '../../integrations/shipping/index.js'
 import { cartWeightGrams, quoteShipping, resolveZone } from './shipping.service.js'
@@ -176,8 +178,25 @@ const methodFields = z.object({
   maxDays: z.coerce.number().int().min(0).max(365).nullable().optional(),
   isCod: z.boolean().default(false),
   codFee: z.coerce.number().int().min(0).default(0),
-  /// Null books by hand; a name selects a registered carrier adapter.
-  provider: z.string().trim().max(60).optional().nullable(),
+  /**
+   * Which carrier books parcels on this method. Null — or the empty string the
+   * admin form sends for "no selection" — means booked by hand, which is a
+   * legitimate configuration rather than a missing one.
+   *
+   * Checked against the registry here rather than at booking time: a typo
+   * saved now is discovered a week later by whoever is packing, and by then
+   * the method is on live orders.
+   */
+  provider: z
+    .string()
+    .trim()
+    .max(60)
+    .optional()
+    .nullable()
+    .transform((value) => (value ? value.toLowerCase() : null))
+    .refine((value) => value === null || isRegisteredProvider(value), {
+      message: `Unknown carrier. Registered adapters: ${listShippingProviders().join(', ')}`,
+    }),
   isActive: z.boolean().default(true),
   position: z.coerce.number().int().min(0).default(0),
 })
@@ -217,12 +236,26 @@ adminShippingRouter.get('/zones', requirePermission('settings.read'), async (_re
     },
   })
 
-  const provider = getShippingProvider()
+  const fallback = getShippingProvider()
 
   return ok(res, {
     zones,
     /** So the admin screen can say whether parcels are booked by hand. */
-    provider: { name: provider.name, canCreateShipments: provider.canCreateShipments },
+    provider: { name: fallback.name, canCreateShipments: fallback.canCreateShipments },
+    /**
+     * Every adapter this build can talk to, so the method form offers a choice
+     * rather than a free-text box. A name typed by hand is a name that fails at
+     * booking time, which is the worst moment to find out.
+     */
+    providers: listShippingProviders().map((name) => {
+      const adapter = getShippingProvider(name)
+      return {
+        name,
+        canCreateShipments: adapter.canCreateShipments,
+        configured: adapter.isConfigured(),
+        isDefault: name === fallback.name,
+      }
+    }),
   })
 })
 

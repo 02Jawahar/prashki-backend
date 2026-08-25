@@ -23,11 +23,11 @@ try {
   process.exit(1)
 }
 
-// A carrier named in the environment but not registered is a configuration
-// error, and it should surface at boot rather than when the first parcel is
-// packed.
+// A carrier named in the environment — or on a shipping method — that is not
+// registered or not configured is a configuration error, and it should surface
+// at boot rather than when the first parcel is packed.
 try {
-  assertShippingConfigured()
+  await assertShippingConfigured()
 } catch (err) {
   logger.fatal(err instanceof Error ? err.message : String(err))
   process.exit(1)

@@ -118,6 +118,11 @@ EMAIL_FROM=orders@example.com
 STORAGE_PROVIDER=local
 STORAGE_LOCAL_DIR=uploads
 STORAGE_PUBLIC_URL=https://api.example.com/uploads
+
+# Parcels booked by hand unless a carrier adapter is registered — see section 6.
+SHIPPING_PROVIDER=manual
+SHIPPING_WEBHOOK_SECRET=<a generated secret>
+SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS=500
 ```
 
 Notes on three of these:
@@ -128,6 +133,9 @@ Notes on three of these:
   subdomains.
 - **`STORAGE_PUBLIC_URL`** is baked into image URLs as they are saved. Set it
   correctly *before* uploading anything, or those rows point at the wrong host.
+- **`SHIPPING_WEBHOOK_SECRET`** is what carrier status callbacks are verified
+  against. Missing, they are all refused — the API warns at boot rather than
+  refusing to start, since a store that books everything by hand needs none.
 
 ### Domain
 
@@ -245,6 +253,111 @@ front that rewrites it. Traefik does not, which is why this works as-is.
 Test with Razorpay's "Send Test Webhook". A correct delivery returns `200` and
 records a row in `webhook_events`; a redelivery of the same event returns `200`
 with `duplicate: true` and changes nothing.
+
+---
+
+## 6. Carrier integration (optional)
+
+The store ships fine without this. `SHIPPING_PROVIDER=manual` means parcels are
+booked with the courier by hand and an operator types the AWB into the admin —
+a legitimate way to run a studio, not a missing feature.
+
+### Booking by hand, but still receiving status updates
+
+Most Indian couriers and 3PLs will POST a status webhook without any bespoke
+integration. That half works out of the box:
+
+| Field | Value |
+|---|---|
+| URL | `https://api.example.com/api/v1/webhooks/shipping` |
+| Secret | the same value as `SHIPPING_WEBHOOK_SECRET` |
+| Signature header | `x-shipping-signature` — hex HMAC-SHA256 of the raw body |
+
+The expected body:
+
+```json
+{
+  "id":             "evt_8891",
+  "trackingNumber": "SMOKE1234567",
+  "status":         "out_for_delivery",
+  "message":        "Out with the rider",
+  "location":       "New Delhi",
+  "occurredAt":     "2026-08-16T09:30:00Z"
+}
+```
+
+`id` is the idempotency key — a redelivery of the same id changes nothing.
+`status` is matched against a vocabulary that covers the usual courier wording
+(`manifested`, `picked_up`, `ofd`, `rto`, …). **A status the mapping does not
+recognise is rejected with 400, not guessed at**, so a gap surfaces as a failed
+callback rather than as a parcel silently stuck in the wrong state.
+
+Without `SHIPPING_WEBHOOK_SECRET` set, every callback is refused. The API logs a
+warning about this at boot rather than refusing to start.
+
+### Adding a real carrier
+
+Three steps, none of which touch anything outside `src/integrations/shipping/`:
+
+**1. Implement the adapter.** `src/integrations/shipping/<carrier>.provider.ts`,
+implementing `ShippingProvider`:
+
+```ts
+export class AcmeShippingProvider implements ShippingProvider {
+  readonly name = 'acme'
+  readonly canCreateShipments = true
+
+  isConfigured() { return Boolean(env.ACME_API_KEY) }
+
+  async createShipment(input: CreateProviderShipmentInput): Promise<ProviderShipment> {
+    // input.codAmount is paise to collect on delivery — 0 for a prepaid parcel.
+    // Return the carrier's own id; it is stored unique so callbacks can find us.
+  }
+
+  async cancelShipment(providerShipmentId: string): Promise<void> { /* … */ }
+  async checkServiceability(postalCode: string): Promise<ServiceabilityResult> { /* … */ }
+
+  parseWebhook(rawBody: Buffer, headers: WebhookHeaders): CarrierEvent | null {
+    // Verify against the RAW bytes. Return null when not authentic; throw an
+    // IntegrationError when authentic but unusable (unmapped status, bad JSON).
+  }
+
+  normalizeWebhook(payload: unknown): CarrierEvent { /* signature-free half */ }
+}
+```
+
+**2. Register it.** One line in `src/integrations/shipping/index.ts`:
+
+```ts
+const ADAPTERS: Record<string, AdapterFactory> = {
+  manual: () => new ManualShippingProvider(),
+  acme: () => new AcmeShippingProvider(),
+}
+```
+
+**3. Choose it per method.** In **Admin → Shipping**, each delivery method has a
+**Booked with** field listing the registered adapters. This is per *method*, not
+per store, so a courier for metro pincodes and hand-booking for the rest is a
+data change rather than a deploy. Leaving it as *By hand* keeps the manual flow.
+
+Give the carrier its own callback address — `/api/v1/webhooks/shipping/acme` —
+since each one signs differently and the adapter has to be chosen before the
+body can be verified.
+
+The boot check refuses to start if a method names an adapter that is not
+registered or is missing its credentials, so a typo is caught on deploy rather
+than by whoever is packing the parcel.
+
+### Cash on delivery
+
+Marking a method **Cash on delivery** adds its handling fee to the order and
+passes the amount to the carrier at booking time. On a split shipment only one
+parcel carries the collection — the courier collects the order total once, not
+once per box — and the admin shows which one.
+
+> **Not yet wired:** choosing a COD method still routes the customer to the
+> payment gateway, because there is no COD payment path. Until that exists, a
+> COD method is a prepaid method with a surcharge. Do not offer one publicly.
 
 ---
 

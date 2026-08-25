@@ -10,12 +10,14 @@ import { recordAudit } from '../../utils/audit.js'
 import {
   announceShipment,
   bookWithProvider,
+  cancelWithCarrier,
   createShipment,
   shipmentInclude,
   trackingUrlFor,
   updateShipmentStatus,
 } from './shipment.service.js'
 import { orderWeightGrams } from '../shipping/shipping.service.js'
+import { getShippingProvider } from '../../integrations/shipping/index.js'
 
 const SHIPMENT_STATUSES = [
   'PENDING',
@@ -139,11 +141,39 @@ adminShipmentRouter.get('/', requirePermission('order.read'), async (req, res) =
     take: orderId ? undefined : 50,
     include: {
       ...shipmentInclude,
-      order: { select: { id: true, orderNumber: true, status: true } },
+      order: {
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          shippingMethod: { select: { provider: true } },
+        },
+      },
     },
   })
 
-  return ok(res, { shipments })
+  /**
+   * Whether asking a carrier to book this parcel would do anything.
+   *
+   * Answered here rather than in the browser because it depends on which
+   * adapters this build registers, which the browser has no way to know. An
+   * "book with carrier" button on a method that books by hand is a button whose
+   * only outcome is an error message.
+   */
+  const canBook = (shipment: (typeof shipments)[number]): boolean => {
+    if (shipment.providerShipmentId || shipment.status === 'CANCELLED') return false
+    try {
+      return getShippingProvider(shipment.order.shippingMethod?.provider).canCreateShipments
+    } catch {
+      // An adapter that is named but no longer registered. Booking would throw,
+      // so the button stays hidden and the boot check reports the real problem.
+      return false
+    }
+  }
+
+  return ok(res, {
+    shipments: shipments.map((shipment) => ({ ...shipment, canBook: canBook(shipment) })),
+  })
 })
 
 adminShipmentRouter.post(
@@ -312,12 +342,23 @@ adminShipmentRouter.patch(
       actorId: req.user!.id,
     })
 
+    /**
+     * Calling the parcel off with the courier, after it is cancelled here.
+     *
+     * Second, and best-effort: the local cancellation released the goods and
+     * must stand whether or not the carrier's API answers. What must not happen
+     * is an operator believing the pickup is cancelled when it is not, so a
+     * failure comes back in the response rather than only in the log.
+     */
+    const carrierError =
+      body.status === 'CANCELLED' ? await cancelWithCarrier(id) : null
+
     const order = await prisma.order.findUniqueOrThrow({
       where: { id: shipment.orderId },
       select: { id: true, orderNumber: true },
     })
     announceShipment(shipment, order, req.user!.id)
 
-    return ok(res, { shipment })
+    return ok(res, { shipment, carrierError })
   },
 )

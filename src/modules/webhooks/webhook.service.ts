@@ -166,7 +166,15 @@ export async function replayWebhookEvent(row: WebhookEventRow): Promise<Outcome>
 
   try {
     if (row.provider.startsWith('shipping:')) {
-      const event = getShippingProvider().normalizeWebhook(payload)
+      /**
+       * Parsed back out of the stored key rather than taken from the
+       * environment: with several carriers configured, replaying a Delhivery
+       * payload through whichever adapter happens to be the default would fail
+       * to parse at best, and mis-map a status at worst.
+       */
+      const event = getShippingProvider(row.provider.slice('shipping:'.length)).normalizeWebhook(
+        payload,
+      )
       // The stored id wins — a provider that falls back to a generated id would
       // otherwise mint a new one on replay and update nothing.
       return await processCarrierEvent({ ...event, eventId: row.eventId }, row.provider)

@@ -1003,6 +1003,17 @@ model Shipment {
   providerShipmentId String? @unique
   labelUrl           String?
 
+  /**
+   * Paise the courier collects on delivery (FR-21.4).
+   *
+   * Zero for a prepaid parcel, and zero for every parcel of a split COD order
+   * except the one carrying the collection — the courier collects the order
+   * total once, not once per box. Stored rather than derived so an operator can
+   * see which parcel the money rides on, and so booking a second parcel cannot
+   * ask for it twice.
+   */
+  codAmount Int @default(0)
+
   /// Dispatch data — who handed it over and when it was packed.
   dispatchedBy String?
   packedAt     DateTime?

@@ -45,6 +45,17 @@ export interface CreateProviderShipmentInput {
   codAmount?: number
 }
 
+/**
+ * Inbound webhook headers, lower-cased by Node.
+ *
+ * The whole set rather than one pre-extracted signature, because carriers do
+ * not agree on how a callback proves itself: an HMAC in `x-shipping-signature`,
+ * a shared key in `x-api-key`, a bearer token, a pair of headers hashed
+ * together. Handing the adapter everything means adding a carrier never means
+ * editing the webhook route.
+ */
+export type WebhookHeaders = Record<string, string | undefined>
+
 export interface ProviderShipment {
   /** The carrier's own id. Stored unique, so a callback can find us by it. */
   providerShipmentId: string
@@ -98,8 +109,15 @@ export interface ShippingProvider {
     options?: { country?: string; cod?: boolean; weightGrams?: number },
   ): Promise<ServiceabilityResult>
 
-  /** Verifies a callback against its signature, using the RAW body bytes. */
-  parseWebhook(rawBody: Buffer, signature: string | undefined): CarrierEvent | null
+  /**
+   * Verifies a callback against its signature, using the RAW body bytes.
+   *
+   * Returns null when the request is not authentic, which the route turns into
+   * a 400. Throwing is for a callback that is authentic but unusable — an
+   * unmapped status, a body that is not JSON — because those need a different
+   * answer from whoever is looking at them.
+   */
+  parseWebhook(rawBody: Buffer, headers: WebhookHeaders): CarrierEvent | null
   /**
    * Turns an already-verified body into an event, without checking a signature.
    *

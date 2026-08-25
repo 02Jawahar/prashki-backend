@@ -9,6 +9,7 @@ import type {
   ProviderShipment,
   ServiceabilityResult,
   ShippingProvider,
+  WebhookHeaders,
 } from './shipping.types.js'
 
 /**
@@ -117,13 +118,15 @@ export class ManualShippingProvider implements ShippingProvider {
     return { serviceable: true, codAvailable: true }
   }
 
-  parseWebhook(rawBody: Buffer, signature: string | undefined): CarrierEvent | null {
+  parseWebhook(rawBody: Buffer, headers: WebhookHeaders): CarrierEvent | null {
     if (!env.SHIPPING_WEBHOOK_SECRET) {
       throw new IntegrationError(
         'SHIPPING_WEBHOOK_SECRET is not set, so carrier callbacks cannot be verified',
         'WEBHOOK_NOT_CONFIGURED',
       )
     }
+
+    const signature = headers['x-shipping-signature'] ?? headers['x-webhook-signature']
     if (!signature) return null
 
     const expected = crypto

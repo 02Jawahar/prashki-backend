@@ -1,9 +1,14 @@
-import { Router } from 'express'
+import { Router, type Request, type Response } from 'express'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../../config/db.js'
 import { logger } from '../../config/logger.js'
 import { getPaymentProvider } from '../../integrations/payment/index.js'
-import { getShippingProvider, type CarrierEvent } from '../../integrations/shipping/index.js'
+import {
+  getShippingProvider,
+  type CarrierEvent,
+  type ShippingProvider,
+  type WebhookHeaders,
+} from '../../integrations/shipping/index.js'
 import { processCarrierEvent, processPaymentEvent } from './webhook.service.js'
 import { AppError } from '../../utils/errors.js'
 
@@ -106,20 +111,38 @@ webhookRouter.post('/razorpay', async (req, res) => {
  * The one addition is ordering. Couriers deliver events late and out of
  * sequence routinely; `applyCarrierEvent` records those but refuses to walk a
  * delivered parcel backwards, flagging it for review instead.
+ *
+ * Two shapes of URL. `/shipping/:provider` names the carrier, which is what a
+ * store using more than one needs — each signs differently, so the adapter has
+ * to be chosen before the body can be verified, and a path segment is the only
+ * part of the request we can trust before verifying it. `/shipping` stays as
+ * the default provider's address so an already-configured callback keeps
+ * working.
  */
-webhookRouter.post('/shipping', async (req, res) => {
-  const provider = getShippingProvider()
+async function handleCarrierWebhook(
+  req: Request,
+  res: Response,
+  providerName?: string,
+): Promise<Response | void> {
+  let provider: ShippingProvider
+  try {
+    provider = getShippingProvider(providerName)
+  } catch {
+    // The name is attacker-controlled, so it is not echoed back.
+    logger.warn({ providerName }, 'Carrier webhook for an unregistered provider')
+    return res.status(404).json({
+      success: false,
+      error: { code: 'PROVIDER_NOT_REGISTERED', message: 'Unknown shipping provider' },
+    })
+  }
 
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body ?? {}))
-  const signature =
-    (req.get('x-shipping-signature') as string | undefined) ??
-    (req.get('x-webhook-signature') as string | undefined)
 
   let event: CarrierEvent | null
   try {
-    event = provider.parseWebhook(rawBody, signature)
+    event = provider.parseWebhook(rawBody, req.headers as WebhookHeaders)
   } catch (err) {
-    logger.error({ err }, 'Carrier webhook parsing failed')
+    logger.error({ err, provider: provider.name }, 'Carrier webhook parsing failed')
     /**
      * The specific code is passed through rather than flattened into one
      * generic failure. "We are not configured", "that status is not in the
@@ -137,18 +160,24 @@ webhookRouter.post('/shipping', async (req, res) => {
   }
 
   if (!event) {
-    logger.warn('Rejected a carrier webhook with an invalid signature')
+    logger.warn({ provider: provider.name }, 'Rejected a carrier webhook with an invalid signature')
     return res.status(400).json({
       success: false,
       error: { code: 'WEBHOOK_SIGNATURE_INVALID', message: 'Invalid signature' },
     })
   }
 
+  /**
+   * The provider name is part of the idempotency key, so two carriers whose
+   * event ids happen to collide do not silence each other's callbacks.
+   */
+  const providerKey = `shipping:${provider.name}`
+
   // ---- idempotency gate ----
   try {
     await prisma.webhookEvent.create({
       data: {
-        provider: `shipping:${provider.name}`,
+        provider: providerKey,
         eventId: event.eventId,
         eventType: event.providerStatus,
         status: 'RECEIVED',
@@ -157,7 +186,7 @@ webhookRouter.post('/shipping', async (req, res) => {
     })
   } catch (err) {
     if ((err as { code?: string }).code === 'P2002') {
-      logger.info({ eventId: event.eventId }, 'Duplicate carrier webhook ignored')
+      logger.info({ eventId: event.eventId, provider: provider.name }, 'Duplicate carrier webhook ignored')
       return res.status(200).json({ success: true, data: { received: true, duplicate: true } })
     }
     throw err
@@ -165,7 +194,13 @@ webhookRouter.post('/shipping', async (req, res) => {
 
   res.status(200).json({ success: true, data: { received: true } })
 
-  void processCarrierEvent(event, `shipping:${provider.name}`).catch((err) =>
+  void processCarrierEvent(event, providerKey).catch((err) =>
     logger.error({ err, eventId: event.eventId }, 'Carrier webhook processing failed'),
   )
-})
+}
+
+webhookRouter.post('/shipping', (req, res) => handleCarrierWebhook(req, res))
+
+webhookRouter.post('/shipping/:provider', (req, res) =>
+  handleCarrierWebhook(req, res, (req.params as { provider: string }).provider),
+)

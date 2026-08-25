@@ -152,6 +152,48 @@ section('FR-21.1  Zones, methods, charges, thresholds and serviceability')
 
   const capped = zones.flatMap((z) => z.methods).find((m) => m.maxWeightGrams)
   check('a method can declare a carrier weight ceiling', Boolean(capped), capped?.name)
+
+  // The registry, so the admin form can offer a choice instead of a text box.
+  const registry = r.json?.data?.providers ?? []
+  check('every registered carrier adapter is listed', registry.length >= 1, registry.map((p) => p.name).join(', '))
+  check(
+    'each adapter reports whether it can book and whether it is configured',
+    registry.every((p) => typeof p.canCreateShipments === 'boolean' && typeof p.configured === 'boolean'),
+  )
+  check('exactly one adapter is the environment default', registry.filter((p) => p.isDefault).length === 1)
+}
+
+// A carrier name that no adapter answers to must be refused when the method is
+// saved. Saved unchecked, it is a typo nobody sees until a parcel is packed.
+{
+  const zones = (await call('/admin/shipping/zones', { jar: admin })).json?.data?.zones ?? []
+  const zoneId = zones.find((z) => z.isDefault)?.id ?? zones[0]?.id
+
+  const bogus = await call(`/admin/shipping/zones/${zoneId}/methods`, {
+    method: 'POST',
+    jar: admin,
+    body: { name: 'Typo carrier', rate: 5000, provider: 'delhivrey' },
+  })
+  check('a method naming an unregistered carrier is rejected', bogus.status === 422, `status ${bogus.status}`)
+  check(
+    'and the error names the adapters that do exist',
+    JSON.stringify(bogus.json ?? {}).includes('manual'),
+  )
+
+  const byHand = await call(`/admin/shipping/zones/${zoneId}/methods`, {
+    method: 'POST',
+    jar: admin,
+    body: { name: 'Smoke by-hand method', rate: 5000, provider: '' },
+  })
+  check(
+    'an empty carrier is stored as booked-by-hand',
+    byHand.status === 201 && byHand.json?.data?.method?.provider === null,
+    `status ${byHand.status}, provider ${JSON.stringify(byHand.json?.data?.method?.provider)}`,
+  )
+
+  if (byHand.json?.data?.method?.id) {
+    await call(`/admin/shipping/methods/${byHand.json.data.method.id}`, { method: 'DELETE', jar: admin })
+  }
 }
 
 {
@@ -333,6 +375,22 @@ let trackingNumber = `SMOKE${Date.now()}`
     booked.status === 409,
     `status ${booked.status} ${booked.json?.error?.code ?? ''}`,
   )
+
+  /*
+   * The admin screen cannot know which adapters this build registers, so the
+   * server says whether booking would do anything. Without it the button is
+   * offered on hand-booked parcels and its only outcome is that 409 above.
+   */
+  const listed = await call(`/admin/shipments?orderId=${orderId}`, { jar: admin })
+  const mine = (listed.json?.data?.shipments ?? []).find((s) => s.id === shipmentId)
+  check('each parcel reports whether a carrier could book it', typeof mine?.canBook === 'boolean')
+  check(
+    'a hand-booked method offers no carrier booking',
+    mine?.canBook === false,
+    `canBook=${mine?.canBook}`,
+  )
+  check('each parcel reports what to collect on delivery', typeof mine?.codAmount === 'number')
+  check('a prepaid parcel collects nothing', mine?.codAmount === 0, `codAmount=${mine?.codAmount}`)
 }
 
 // ═════════════════════════════════════════ FR-21.5 — provider status updates
@@ -456,6 +514,44 @@ if (WEBHOOK_SECRET) {
   {
     const cleared = await call(`/admin/shipments/${shipmentId}/reviewed`, { method: 'POST', jar: admin })
     check('an operator can clear the review flag', cleared.json?.data?.shipment?.needsReview === false)
+  }
+
+  /*
+   * The per-carrier callback address. A store using more than one courier
+   * cannot share a single endpoint: each signs differently, so the adapter has
+   * to be picked before the body can be verified, and the path segment is the
+   * only part of the request that can be trusted before verifying it.
+   */
+  {
+    const body = { id: `evt-named-${Date.now()}`, trackingNumber: 'NOSUCH', status: 'in_transit' }
+    const raw = JSON.stringify(body)
+    const sig = crypto.createHmac('sha256', WEBHOOK_SECRET).update(raw).digest('hex')
+
+    const named = await fetch(`${BASE}/webhooks/shipping/manual`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-shipping-signature': sig },
+      body: raw,
+    })
+    check('a callback addressed to a named carrier is accepted', named.status === 200, `status ${named.status}`)
+
+    const unknown = await fetch(`${BASE}/webhooks/shipping/delhivery`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-shipping-signature': sig },
+      body: raw,
+    })
+    const unknownJson = await unknown.json().catch(() => null)
+    check(
+      'a callback for an unregistered carrier is refused',
+      unknown.status === 404 && unknownJson?.error?.code === 'PROVIDER_NOT_REGISTERED',
+      `status ${unknown.status}`,
+    )
+
+    const forged = await fetch(`${BASE}/webhooks/shipping/manual`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-shipping-signature': 'deadbeef' },
+      body: raw,
+    })
+    check('the named route verifies signatures too', forged.status === 400, `status ${forged.status}`)
   }
 } else {
   console.log('  (skipped — set SHIPPING_WEBHOOK_SECRET to run these)')

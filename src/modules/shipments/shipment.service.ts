@@ -1,5 +1,6 @@
 import type { Prisma, ShipmentStatus } from '@prisma/client'
 import { prisma } from '../../config/db.js'
+import { logger } from '../../config/logger.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { emit } from '../../events/bus.js'
 import { recordAudit } from '../../utils/audit.js'
@@ -67,7 +68,12 @@ export async function createShipment(input: CreateShipmentInput) {
   return prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
       where: { id: input.orderId },
-      include: { items: true, shipments: { include: { items: true } } },
+      include: {
+        items: true,
+        shipments: { include: { items: true } },
+        shippingMethod: { select: { isCod: true } },
+        payments: { where: { status: 'CAPTURED' }, select: { id: true } },
+      },
     })
     if (!order) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
 
@@ -109,6 +115,27 @@ export async function createShipment(input: CreateShipmentInput) {
     const carrier = input.carrier?.trim() || null
     const trackingNumber = input.trackingNumber?.trim() || null
 
+    /**
+     * What the courier collects for this parcel (FR-21.4).
+     *
+     * Decided when the parcel is created, not when it is booked, because a
+     * hand-booked parcel is never "booked" at all — and its operator is the one
+     * writing the amount on the courier's form, so they are exactly who needs
+     * to see it.
+     *
+     * Three things have to hold: the customer chose a cash-on-delivery method,
+     * no payment was actually captured (someone who chose COD and then paid
+     * online must not be charged twice), and no sibling parcel is already
+     * carrying the collection — the courier collects the order total once, not
+     * once per box.
+     */
+    const codAmount =
+      order.shippingMethod?.isCod &&
+      order.payments.length === 0 &&
+      !order.shipments.some((s) => s.status !== 'CANCELLED' && s.codAmount > 0)
+        ? order.total
+        : 0
+
     const shipment = await tx.shipment.create({
       data: {
         orderId: order.id,
@@ -121,6 +148,7 @@ export async function createShipment(input: CreateShipmentInput) {
         lengthMm: input.lengthMm ?? null,
         widthMm: input.widthMm ?? null,
         heightMm: input.heightMm ?? null,
+        codAmount,
         estimatedAt: input.estimatedAt ?? null,
         notes: input.notes ?? null,
         dispatchedBy: input.dispatchedBy ?? null,
@@ -343,19 +371,11 @@ export async function updateShipmentStatus(args: {
  * rather than rolling back goods that are already packed.
  */
 export async function bookWithProvider(shipmentId: string) {
-  const provider = getShippingProvider()
-  if (!provider.canCreateShipments) {
-    throw new ConflictError(
-      'This delivery method is booked by hand. Record the tracking number once the courier gives you one.',
-      'SHIPPING_PROVIDER_MANUAL',
-    )
-  }
-
   const shipment = await prisma.shipment.findUnique({
     where: { id: shipmentId },
     include: {
       items: { include: { orderItem: true } },
-      order: true,
+      order: { include: { shippingMethod: true } },
     },
   })
   if (!shipment) throw new NotFoundError('Shipment', 'SHIPMENT_NOT_FOUND')
@@ -364,7 +384,27 @@ export async function bookWithProvider(shipmentId: string) {
     throw new ConflictError('That parcel is already booked with the carrier', 'ALREADY_BOOKED')
   }
 
+  /**
+   * The method the customer actually chose decides the carrier, falling back
+   * to the environment default when it names none. Without this the column is
+   * decoration: every parcel would go to one carrier however the zones were
+   * configured, and a store using a courier for metro pincodes and India Post
+   * elsewhere could not express that at all.
+   */
+  const provider = getShippingProvider(shipment.order.shippingMethod?.provider)
+
+  if (!provider.canCreateShipments) {
+    throw new ConflictError(
+      'This delivery method is booked by hand. Record the tracking number once the courier gives you one.',
+      'SHIPPING_PROVIDER_MANUAL',
+    )
+  }
+
   const address = shipment.order.shippingAddressSnapshot as Record<string, string | null>
+
+  // Decided when the parcel was created, so booking cannot disagree with what
+  // the operator was already shown on screen.
+  const codAmount = shipment.codAmount
 
   const booked = await provider.createShipment({
     shipmentNumber: shipment.shipmentNumber,
@@ -389,6 +429,7 @@ export async function bookWithProvider(shipmentId: string) {
     lengthMm: shipment.lengthMm,
     widthMm: shipment.widthMm,
     heightMm: shipment.heightMm,
+    codAmount,
   })
 
   const carrier = booked.carrier ?? shipment.carrier
@@ -404,16 +445,73 @@ export async function bookWithProvider(shipmentId: string) {
       trackingUrl: trackingUrlFor(carrier, trackingNumber),
       labelUrl: booked.labelUrl ?? null,
       estimatedAt: booked.estimatedAt ?? shipment.estimatedAt,
+      codAmount,
       events: {
         create: {
           status: shipment.status,
-          message: `Booked with ${provider.name}`,
+          message:
+            codAmount > 0
+              ? `Booked with ${provider.name} — collect ${(codAmount / 100).toFixed(2)} on delivery`
+              : `Booked with ${provider.name}`,
           source: 'system',
         },
       },
     },
     include: shipmentInclude,
   })
+}
+
+/**
+ * Tells the carrier a parcel is off (FR-21.3).
+ *
+ * Best-effort by design, and the local cancellation is what matters: goods that
+ * are not going out must be released back to stock and taken off the order
+ * whether or not the courier's API answers. A failure is returned rather than
+ * thrown so the caller can show it — an operator who cancels here and does not
+ * hear that the carrier still has a pickup booked will find out from an invoice.
+ */
+export async function cancelWithCarrier(shipmentId: string): Promise<string | null> {
+  const shipment = await prisma.shipment.findUnique({
+    where: { id: shipmentId },
+    select: { providerShipmentId: true, provider: true },
+  })
+
+  // Nothing was booked with anyone, so there is nothing to call off.
+  if (!shipment?.providerShipmentId) return null
+
+  try {
+    await getShippingProvider(shipment.provider).cancelShipment(shipment.providerShipmentId)
+
+    await prisma.shipmentEvent.create({
+      data: {
+        shipmentId,
+        status: 'CANCELLED',
+        message: `Cancelled with ${shipment.provider ?? 'the carrier'}`,
+        source: 'system',
+      },
+    })
+
+    return null
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'The carrier could not be reached'
+
+    logger.error(
+      { err, shipmentId, provider: shipment.provider },
+      'Carrier cancellation failed — the parcel may still be booked',
+    )
+
+    await prisma.shipment
+      .update({
+        where: { id: shipmentId },
+        data: {
+          needsReview: true,
+          reviewReason: `Cancelled here, but ${shipment.provider ?? 'the carrier'} was not reachable — check the pickup is called off`,
+        },
+      })
+      .catch(() => undefined)
+
+    return message
+  }
 }
 
 /**
