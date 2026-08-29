@@ -7,6 +7,7 @@
  *
  *   - the permission catalogue and the six default roles
  *   - store settings, if none exist
+ *   - the policy pages the storefront footer links to, if they do not exist
  *   - one Super Admin, if there are no users at all
  *
  * It adds no products, no customers and no demo content, it deletes nothing,
@@ -18,7 +19,7 @@
 import { PrismaClient, Prisma } from '@prisma/client'
 import { hash } from '@node-rs/argon2'
 import { env } from '../src/config/env.js'
-import { PERMISSIONS, ROLES, DEFAULT_SETTINGS, MESSAGE_TEMPLATES } from './seed-data.js'
+import { PERMISSIONS, ROLES, DEFAULT_SETTINGS, MESSAGE_TEMPLATES, SYSTEM_PAGES } from './seed-data.js'
 
 const prisma = new PrismaClient({ datasources: { db: { url: env.DATABASE_URL } } })
 
@@ -157,6 +158,75 @@ async function syncSettings(): Promise<number> {
 }
 
 /**
+ * Creates the policy pages the storefront links to.
+ *
+ * The footer links /about, /contact, /shipping-policy and /returns-policy on
+ * every page, and the CMS catch-all 404s on a slug with no published page — so
+ * a store bootstrapped without these ships four dead links and no terms of
+ * sale. They are part of a working install, not demo content.
+ *
+ * Published on creation: a draft policy 404s exactly like a missing one, which
+ * would leave the links just as dead.
+ *
+ * An existing page is refreshed only while nobody has touched it. Every admin
+ * save writes a revision, so exactly one revision means the page still holds
+ * the copy we put there and can be brought up to date; a second revision means
+ * an editor has been in, and from then on the wording is the store's, not ours.
+ * Without that, a store seeded before the policies were written would keep the
+ * one-line placeholders forever and no deploy could ever correct them.
+ */
+async function syncPages(): Promise<{ added: number; refreshed: number }> {
+  let added = 0
+  let refreshed = 0
+
+  for (const page of SYSTEM_PAGES) {
+    const blocks = page.blocks as unknown as Prisma.InputJsonValue
+    const existing = await prisma.page.findUnique({
+      where: { slug: page.slug },
+      select: { id: true, _count: { select: { revisions: true } } },
+    })
+
+    if (!existing) {
+      await prisma.page.create({
+        data: {
+          slug: page.slug,
+          title: page.title,
+          status: 'PUBLISHED',
+          isSystem: true,
+          publishedAt: new Date(),
+          blocks,
+          seoDescription: page.seoDescription,
+          revisions: {
+            create: { version: 1, title: page.title, blocks, note: 'Bootstrapped' },
+          },
+        },
+      })
+      added++
+      continue
+    }
+
+    if (existing._count.revisions !== 1) continue
+
+    await prisma.page.update({
+      where: { id: existing.id },
+      data: {
+        title: page.title,
+        blocks,
+        seoDescription: page.seoDescription,
+        revisions: {
+          // Version 2, so the untouched-page test fails from here on and a
+          // later deploy leaves this page alone.
+          create: { version: 2, title: page.title, blocks, note: 'Bootstrapped' },
+        },
+      },
+    })
+    refreshed++
+  }
+
+  return { added, refreshed }
+}
+
+/**
  * Creates the first admin, and only ever the first.
  *
  * Guarded on there being no users at all rather than no admins: a store with
@@ -200,6 +270,12 @@ async function main() {
 
   const settings = await syncSettings()
   console.log(`  ${settings} settings added${settings === 0 ? ' (already configured)' : ''}`)
+
+  const pages = await syncPages()
+  console.log(
+    `  ${pages.added} policy pages added, ${pages.refreshed} refreshed` +
+      (pages.added === 0 && pages.refreshed === 0 ? ' (already present, and edited)' : ''),
+  )
 
   const admin = await createFirstAdmin()
 
