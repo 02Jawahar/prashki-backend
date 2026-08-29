@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { PrismaClient, Prisma } from '@prisma/client'
 import { hash } from '@node-rs/argon2'
 import { env } from '../src/config/env.js'
-import { ALL, MESSAGE_TEMPLATES, PERMISSIONS, ROLES } from './seed-data.js'
+import { ALL, MESSAGE_TEMPLATES, PERMISSIONS, ROLES, SYSTEM_PAGES } from './seed-data.js'
 
 const prisma = new PrismaClient({ datasources: { db: { url: env.DATABASE_URL } } })
 
@@ -408,7 +408,7 @@ async function seedSettings() {
     label: string
   }> = [
     { key: 'store.name', value: 'Prash & Ki', type: 'STRING', group: 'general', label: 'Store name' },
-    { key: 'store.email', value: 'care@example.com', type: 'STRING', group: 'general', label: 'Store email' },
+    { key: 'store.email', value: 'care@prashandki.in', type: 'STRING', group: 'general', label: 'Store email' },
     { key: 'store.phone', value: '+91 98100 00000', type: 'STRING', group: 'general', label: 'Store phone' },
     { key: 'store.currency', value: 'INR', type: 'STRING', group: 'general', label: 'Currency' },
     { key: 'store.country', value: 'IN', type: 'STRING', group: 'general', label: 'Country' },
@@ -694,83 +694,15 @@ async function seedShipping() {
   return { zones: 3, methods: metro.methods.length + india.methods.length, bands: 8 }
 }
 
-/** Policy pages the footer and checkout link to. Marked system so they stay. */
+/**
+ * Policy pages the footer and checkout link to. Marked system so they stay.
+ *
+ * The copy lives in seed-data, shared with the production bootstrap — a demo
+ * shop and a real one want the same policies, and only one of them should own
+ * the wording.
+ */
 async function seedPages() {
-  const pages = [
-    {
-      slug: 'about',
-      title: 'About Prash & Ki',
-      blocks: [
-        {
-          type: 'richText',
-          data: {
-            html: '<p>Prash &amp; Ki is a small studio making crafted couture in limited runs. Every piece is cut, sewn and finished by hand.</p>',
-          },
-        },
-      ],
-      seoDescription: 'A small studio making crafted couture in limited runs.',
-    },
-    {
-      slug: 'contact',
-      title: 'Contact',
-      blocks: [
-        {
-          type: 'richText',
-          data: {
-            html: '<p>Write to us and we will reply within one working day.</p>',
-          },
-        },
-      ],
-      seoDescription: 'Get in touch with the Prash & Ki studio.',
-    },
-    {
-      slug: 'shipping-policy',
-      title: 'Shipping',
-      blocks: [
-        {
-          type: 'richText',
-          data: {
-            html: '<p>Orders are despatched within two working days. Delivery estimates are shown at checkout for your address.</p>',
-          },
-        },
-      ],
-      seoDescription: 'How and when we deliver.',
-    },
-    {
-      slug: 'returns-policy',
-      title: 'Returns',
-      blocks: [
-        {
-          type: 'richText',
-          data: {
-            html: '<p>Unworn pieces may be returned within seven days of delivery. Start a return from your account.</p>',
-          },
-        },
-      ],
-      seoDescription: 'Our seven-day return policy.',
-    },
-    {
-      slug: 'privacy-policy',
-      title: 'Privacy',
-      blocks: [
-        {
-          type: 'richText',
-          data: {
-            html: '<p>We collect only what an order needs, and never sell your details.</p>',
-          },
-        },
-      ],
-      seoDescription: 'What we collect, and why.',
-    },
-    {
-      slug: 'terms',
-      title: 'Terms of Service',
-      blocks: [
-        { type: 'richText', data: { html: '<p>The terms that apply when you buy from us.</p>' } },
-      ],
-      seoDescription: 'The terms that apply when you buy from us.',
-    },
-  ]
+  const pages = SYSTEM_PAGES
 
   for (const page of pages) {
     await prisma.page.create({
