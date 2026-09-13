@@ -341,7 +341,7 @@ export const SYSTEM_PAGES: SeedPage[] = [
 <p>This website is operated by Prash &amp; Ki. By browsing the site, creating an account or placing an order you agree to these terms. If you do not accept them, please do not use the site. We may update them from time to time; the version published here when you place an order is the one that applies to that order.</p>
 
 <h2>2. Your account</h2>
-<p>You may shop as a guest or create an account. If you create one, keep your password confidential and give us accurate contact and delivery details — we are not responsible for orders that fail because the details entered were wrong.</p>
+<p>An account is needed to place an order, so that you can track it and raise a return against it. Keep your password confidential and give us accurate contact and delivery details — we are not responsible for orders that fail because the details entered were wrong.</p>
 <p>You must be at least 18, or have the consent of a parent or guardian, to place an order. We may suspend or close an account that is used fraudulently or in breach of these terms.</p>
 
 <h2>3. Products and how they are described</h2>

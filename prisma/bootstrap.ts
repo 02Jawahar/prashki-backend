@@ -168,12 +168,15 @@ async function syncSettings(): Promise<number> {
  * Published on creation: a draft policy 404s exactly like a missing one, which
  * would leave the links just as dead.
  *
- * An existing page is refreshed only while nobody has touched it. Every admin
- * save writes a revision, so exactly one revision means the page still holds
- * the copy we put there and can be brought up to date; a second revision means
- * an editor has been in, and from then on the wording is the store's, not ours.
- * Without that, a store seeded before the policies were written would keep the
- * one-line placeholders forever and no deploy could ever correct them.
+ * An existing page is refreshed only while nobody has touched it. "Touched"
+ * is read off revision authorship: an admin save stamps `createdById`, and
+ * bootstrap and the seed leave it null. So a page whose every revision is
+ * unauthored still holds the copy we put there and can be brought up to date,
+ * and the first human save ends that for good.
+ *
+ * Counting revisions instead would be wrong: two bootstrap runs would spend
+ * the allowance and freeze the page against a later correction, even though
+ * no person had ever edited it.
  */
 async function syncPages(): Promise<{ added: number; refreshed: number }> {
   let added = 0
@@ -183,7 +186,10 @@ async function syncPages(): Promise<{ added: number; refreshed: number }> {
     const blocks = page.blocks as unknown as Prisma.InputJsonValue
     const existing = await prisma.page.findUnique({
       where: { slug: page.slug },
-      select: { id: true, _count: { select: { revisions: true } } },
+      select: {
+        id: true,
+        _count: { select: { revisions: { where: { createdById: { not: null } } } } },
+      },
     })
 
     if (!existing) {
@@ -205,7 +211,14 @@ async function syncPages(): Promise<{ added: number; refreshed: number }> {
       continue
     }
 
-    if (existing._count.revisions !== 1) continue
+    // A human has saved this page. The wording is the store's now.
+    if (existing._count.revisions > 0) continue
+
+    const latest = await prisma.pageRevision.findFirst({
+      where: { pageId: existing.id },
+      orderBy: { version: 'desc' },
+      select: { version: true },
+    })
 
     await prisma.page.update({
       where: { id: existing.id },
@@ -214,9 +227,12 @@ async function syncPages(): Promise<{ added: number; refreshed: number }> {
         blocks,
         seoDescription: page.seoDescription,
         revisions: {
-          // Version 2, so the untouched-page test fails from here on and a
-          // later deploy leaves this page alone.
-          create: { version: 2, title: page.title, blocks, note: 'Bootstrapped' },
+          create: {
+            version: (latest?.version ?? 0) + 1,
+            title: page.title,
+            blocks,
+            note: 'Bootstrapped',
+          },
         },
       },
     })

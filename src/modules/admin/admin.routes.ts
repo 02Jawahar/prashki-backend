@@ -15,6 +15,9 @@ export const adminDashboardRouter: Router = Router()
 /**
  * Dashboard (spec §7). Every figure is a real query — no placeholder numbers.
  */
+/** The statuses that mean the money actually arrived. */
+const EARNING_STATUSES = ['PAID', 'PROCESSING', 'SHIPPED', 'DELIVERED'] as const
+
 adminDashboardRouter.get('/stats', requirePermission('dashboard.read'), async (_req, res) => {
   const [
     totalProducts,
@@ -23,18 +26,43 @@ adminDashboardRouter.get('/stats', requirePermission('dashboard.read'), async (_
     totalOrders,
     pendingOrders,
     revenue,
+    refunded,
+    lowStockCount,
     lowStockItems,
   ] = await Promise.all([
     prisma.product.count(),
     prisma.product.count({ where: { status: 'ACTIVE' } }),
+    /**
+     * Every customer account, suspended ones included — the same filter the
+     * customer list uses, so the card and the page it links to agree.
+     */
     prisma.user.count({ where: { role: 'CUSTOMER' } }),
     prisma.order.count(),
     prisma.order.count({ where: { status: 'PENDING_PAYMENT' } }),
     // Revenue counts orders that actually got paid — not carts, not abandoned
     // pending-payment orders.
     prisma.order.aggregate({
-      where: { status: { in: ['PAID', 'PROCESSING', 'SHIPPED', 'DELIVERED'] } },
+      where: { status: { in: [...EARNING_STATUSES] } },
       _sum: { total: true },
+    }),
+    /**
+     * Money sent back, which the order total does not record: an order stays
+     * DELIVERED after a refund and there is no REFUNDED status, so without
+     * this the figure keeps counting revenue the store no longer has. Scoped
+     * to orders inside EARNING_STATUSES, or a refund on a cancelled order —
+     * never added to the sum above — would be subtracted from it.
+     */
+    prisma.refund.aggregate({
+      where: { status: 'COMPLETED', order: { status: { in: [...EARNING_STATUSES] } } },
+      _sum: { amount: true },
+    }),
+    /**
+     * Counted, not measured off the list below. `lowStock` takes a row limit,
+     * so `lowStockItems.length` is the size of the preview and would report
+     * "5" for a store with fifty variants under threshold.
+     */
+    prisma.inventory.count({
+      where: { availableStock: { lte: prisma.inventory.fields.lowStockThreshold } },
     }),
     lowStock(5),
   ])
@@ -45,8 +73,8 @@ adminDashboardRouter.get('/stats', requirePermission('dashboard.read'), async (_
     totalCustomers,
     totalOrders,
     pendingOrders,
-    totalRevenue: revenue._sum.total ?? 0,
-    lowStockCount: lowStockItems.length,
+    totalRevenue: (revenue._sum.total ?? 0) - (refunded._sum.amount ?? 0),
+    lowStockCount,
     lowStockItems,
   })
 })
