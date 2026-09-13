@@ -14,6 +14,10 @@ uploads/*
 .env
 .env.local
 .env*.local
+# ...and any hand-made copy: .env.backup, .env.old, .env.prod. These hold the
+# same secrets as .env and the three patterns above do not match them.
+.env.*
+!.env.example
 
 .DS_Store
 Thumbs.db
