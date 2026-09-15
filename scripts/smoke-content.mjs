@@ -180,5 +180,87 @@ let videoUrl
   check('deleted media stops being served', gone.status === 404, `${gone.status}`)
 }
 
+// -------------------------------------------------- navigation (M25)
+//
+// The menu is the one piece of storefront content that used to need a deploy:
+// it lives in a JSON setting, and the Settings screen filters JSON out.
+console.log('\nMain navigation\n')
+
+{
+  const before = await call('/admin/navigation', { jar: admin })
+  const original = before.json?.data?.items ?? []
+  check('the current menu can be read', before.status === 200, `${original.length} top-level items`)
+  check('the drawable depth is reported', before.json?.data?.maxDepth === 3)
+
+  // Three levels: item -> column heading -> link. What the header draws.
+  const tree = [
+    { label: 'Home', href: '/' },
+    {
+      label: 'Ready to Wear',
+      href: '/products',
+      children: [
+        {
+          label: "Women's",
+          href: '/products',
+          children: [
+            { label: 'Casuals', href: '/categories/casuals' },
+            { label: 'Bridal', href: '/categories/bridal' },
+          ],
+        },
+      ],
+    },
+  ]
+
+  const saved = await call('/admin/navigation', { method: 'PUT', jar: admin, body: { items: tree } })
+  check('a three-level menu saves', saved.status === 200, `status ${saved.status}`)
+
+  const back = saved.json?.data?.items ?? []
+  check('the tree round-trips intact', back[1]?.children?.[0]?.children?.length === 2)
+  check('a heading keeps its own link', back[1]?.children?.[0]?.href === '/products')
+
+  // A fourth level would save and then silently vanish from the header, which
+  // is indistinguishable from a bug.
+  const deep = await call('/admin/navigation', {
+    method: 'PUT',
+    jar: admin,
+    body: {
+      items: [
+        { label: 'A', href: '/a', children: [
+          { label: 'B', href: '/b', children: [
+            { label: 'C', href: '/c', children: [{ label: 'D', href: '/d' }] }] }] },
+      ],
+    },
+  })
+  check('a fourth level is refused', deep.status === 422, deep.json?.error?.code)
+
+  /*
+   * An admin menu that can point off-site is a stored-redirect primitive:
+   * whoever can edit it could aim the whole store's navigation at a lookalike
+   * checkout.
+   */
+  for (const [href, label] of [
+    ['https://lookalike.example/checkout', 'an absolute URL'],
+    ['//lookalike.example', 'a protocol-relative URL'],
+  ]) {
+    const off = await call('/admin/navigation', {
+      method: 'PUT', jar: admin, body: { items: [{ label: 'Evil', href }] },
+    })
+    check(`${label} is refused`, off.status === 422, `status ${off.status}`)
+  }
+
+  const survived = await call('/admin/navigation', { jar: admin })
+  check(
+    'a rejected write leaves the live menu alone',
+    survived.json?.data?.items?.length === 2,
+    `${survived.json?.data?.items?.length} items`,
+  )
+
+  const restored = await call('/admin/navigation', {
+    method: 'PUT', jar: admin, body: { items: original },
+  })
+  check('original menu restored', restored.status === 200)
+}
+
+
 console.log(`\n${passed} passed, ${failed} failed\n`)
 process.exit(failed === 0 ? 0 : 1)

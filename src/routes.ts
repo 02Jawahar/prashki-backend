@@ -22,6 +22,7 @@ import {
 } from './modules/returns/return.routes.js'
 import { adminPageRouter, pageRouter } from './modules/content/page.routes.js'
 import { adminRedirectRouter, redirectRouter } from './modules/content/redirect.routes.js'
+import { adminNavigationRouter } from './modules/content/navigation.routes.js'
 import { seoRouter } from './modules/content/seo.routes.js'
 import {
   adminMessageRouter,
@@ -139,6 +140,7 @@ adminRouter.use('/returns', adminReturnRouter)
 adminRouter.use('/refunds', adminRefundRouter)
 adminRouter.use('/pages', adminPageRouter)
 adminRouter.use('/redirects', adminRedirectRouter)
+adminRouter.use('/navigation', adminNavigationRouter)
 adminRouter.use('/showcase', adminShowcaseRouter)
 adminRouter.use('/messaging', adminMessageRouter)
 adminRouter.use('/reviews', adminReviewRouter)
