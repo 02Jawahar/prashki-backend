@@ -125,8 +125,18 @@ let videoUrl
 // ------------------------------------------------- save the hero and render
 {
   const sections = JSON.parse(original)
-  const hero = sections.find((s) => s.type === 'hero')
-  check('homepage config contains a hero', Boolean(hero))
+  /*
+   * The test supplies its own hero rather than assuming the live homepage has
+   * one. A store whose top section is a film wall is a perfectly valid
+   * homepage, and a test that only passes against one particular arrangement of
+   * content is testing the content, not the editor.
+   */
+  let hero = sections.find((s) => s.type === 'hero')
+  if (!hero) {
+    hero = { type: 'hero', image: '', eyebrow: '', heading: '', body: '', ctaLabel: '', ctaHref: '/products' }
+    sections.push(hero)
+  }
+  check('a hero section is available to edit', Boolean(hero))
 
   hero.image = heroUrl
   hero.heading = 'Content Editor Works'
@@ -147,7 +157,11 @@ let videoUrl
 // -------------------------------------------------------- video rendering
 {
   const sections = JSON.parse(original)
-  const hero = sections.find((s) => s.type === 'hero')
+  let hero = sections.find((s) => s.type === 'hero')
+  if (!hero) {
+    hero = { type: 'hero', image: '', eyebrow: '', heading: '', body: '', ctaLabel: '', ctaHref: '/products' }
+    sections.push(hero)
+  }
   hero.image = videoUrl
   hero.heading = 'Video Hero'
 
@@ -190,9 +204,9 @@ console.log('\nMain navigation\n')
   const before = await call('/admin/navigation', { jar: admin })
   const original = before.json?.data?.items ?? []
   check('the current menu can be read', before.status === 200, `${original.length} top-level items`)
-  check('the drawable depth is reported', before.json?.data?.maxDepth === 3)
+  check('the drawable depth is reported', before.json?.data?.maxDepth === 4)
 
-  // Three levels: item -> column heading -> link. What the header draws.
+  // Four levels: item -> column -> group -> link. What the header draws.
   const tree = [
     { label: 'Home', href: '/' },
     {
@@ -203,8 +217,14 @@ console.log('\nMain navigation\n')
           label: "Women's",
           href: '/products',
           children: [
-            { label: 'Casuals', href: '/categories/casuals' },
-            { label: 'Bridal', href: '/categories/bridal' },
+            {
+              label: 'Casual',
+              href: '/products?category=casuals',
+              children: [
+                { label: 'Short Dresses', href: '/products?category=casuals-short-dresses' },
+                { label: 'Long Dresses', href: '/products?category=casuals-long-dresses' },
+              ],
+            },
           ],
         },
       ],
@@ -212,13 +232,13 @@ console.log('\nMain navigation\n')
   ]
 
   const saved = await call('/admin/navigation', { method: 'PUT', jar: admin, body: { items: tree } })
-  check('a three-level menu saves', saved.status === 200, `status ${saved.status}`)
+  check('a four-level menu saves', saved.status === 200, `status ${saved.status}`)
 
   const back = saved.json?.data?.items ?? []
-  check('the tree round-trips intact', back[1]?.children?.[0]?.children?.length === 2)
-  check('a heading keeps its own link', back[1]?.children?.[0]?.href === '/products')
+  check('the tree round-trips intact', back[1]?.children?.[0]?.children?.[0]?.children?.length === 2)
+  check('a column keeps its own link', back[1]?.children?.[0]?.href === '/products')
 
-  // A fourth level would save and then silently vanish from the header, which
+  // A fifth level would save and then silently vanish from the header, which
   // is indistinguishable from a bug.
   const deep = await call('/admin/navigation', {
     method: 'PUT',
@@ -227,11 +247,12 @@ console.log('\nMain navigation\n')
       items: [
         { label: 'A', href: '/a', children: [
           { label: 'B', href: '/b', children: [
-            { label: 'C', href: '/c', children: [{ label: 'D', href: '/d' }] }] }] },
+            { label: 'C', href: '/c', children: [
+              { label: 'D', href: '/d', children: [{ label: 'E', href: '/e' }] }] }] }] },
       ],
     },
   })
-  check('a fourth level is refused', deep.status === 422, deep.json?.error?.code)
+  check('a fifth level is refused', deep.status === 422, deep.json?.error?.code)
 
   /*
    * An admin menu that can point off-site is a stored-redirect primitive:

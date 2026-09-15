@@ -1,4 +1,5 @@
 import { prisma } from '../config/db.js'
+import { activateForOrder } from '../modules/giftcards/giftcard.service.js'
 import { logger } from '../config/logger.js'
 import { formatPaise } from '../utils/money.js'
 import { sendToAllChannels } from '../modules/messaging/message.service.js'
@@ -79,6 +80,39 @@ export function registerEventHandlers(): void {
   on('ORDER_PAID', async ({ orderId, orderNumber, userId, total }) => {
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } })
     if (!order) return
+
+    /**
+     * A gift card bought on this order becomes spendable now, and only now.
+     * Issuing it when the order was created would mint money for anyone who
+     * opened the payment page and walked away.
+     */
+    const activated = await activateForOrder(orderId)
+    if (activated > 0) {
+      const cards = await prisma.giftCard.findMany({ where: { orderId, status: 'ACTIVE' } })
+
+      for (const card of cards) {
+        // Falls back to the buyer: a card bought for someone with no email
+        // still has to reach somebody, and the buyer can forward it.
+        const to = card.recipientEmail ?? order.user.email
+
+        await sendToAllChannels({
+          key: 'giftcard.issued',
+          contact: { email: to, phone: null },
+          // No userId: the recipient is usually not a customer, and a
+          // preference check would look them up and find nothing.
+          variables: {
+            name: card.recipientName ?? order.user.name,
+            code: card.code,
+            amount: formatPaise(card.initialValue),
+            message: card.message ?? '',
+            from: order.user.name,
+            expiresOn: card.expiresAt ? card.expiresAt.toDateString() : '',
+          },
+          entityType: 'GiftCard',
+          entityId: card.id,
+        })
+      }
+    }
 
     const variables = { orderNumber, name: order.user.name, total: formatPaise(total) }
 

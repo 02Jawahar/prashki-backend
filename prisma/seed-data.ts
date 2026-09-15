@@ -532,4 +532,12 @@ export const MESSAGE_TEMPLATES: SeedTemplate[] = [
       body: 'Hello {{name}},\n\nWe have sent {{amount}} back to your original payment method for order {{orderNumber}}. It usually arrives within 5-7 working days.',
       variables: ['name', 'orderNumber', 'amount'],
     },
+    {
+      key: 'giftcard.issued',
+      channel: 'EMAIL',
+      name: 'Gift card',
+      subject: 'A gift card from {{from}}',
+      body: 'Hello {{name}},\n\n{{from}} has sent you a Prash & Ki gift card for {{amount}}.\n\n{{message}}\n\nYour code is {{code}}\n\nEnter it at checkout. It can be spent across several orders until the balance runs out, and is valid until {{expiresOn}}.\n\nPrash & Ki',
+      variables: ['name', 'from', 'amount', 'code', 'message', 'expiresOn'],
+    },
 ]

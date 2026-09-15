@@ -23,6 +23,8 @@ import {
 import { adminPageRouter, pageRouter } from './modules/content/page.routes.js'
 import { adminRedirectRouter, redirectRouter } from './modules/content/redirect.routes.js'
 import { adminNavigationRouter } from './modules/content/navigation.routes.js'
+import { adminCollectionRouter, collectionRouter } from './modules/collections/collection.routes.js'
+import { adminGiftCardRouter, giftCardRouter } from './modules/giftcards/giftcard.routes.js'
 import { seoRouter } from './modules/content/seo.routes.js'
 import {
   adminMessageRouter,
@@ -70,6 +72,8 @@ apiRouter.use('/cart', cartRouter)
 apiRouter.use('/shipping', shippingRouter)
 apiRouter.use('/pages', pageRouter)
 apiRouter.use('/redirects', redirectRouter)
+apiRouter.use('/collections', collectionRouter)
+apiRouter.use('/gift-cards', giftCardRouter)
 apiRouter.use('/seo', seoRouter)
 apiRouter.use('/reviews', reviewRouter)
 apiRouter.use('/analytics', analyticsRouter)
@@ -141,6 +145,8 @@ adminRouter.use('/refunds', adminRefundRouter)
 adminRouter.use('/pages', adminPageRouter)
 adminRouter.use('/redirects', adminRedirectRouter)
 adminRouter.use('/navigation', adminNavigationRouter)
+adminRouter.use('/collections', adminCollectionRouter)
+adminRouter.use('/gift-cards', adminGiftCardRouter)
 adminRouter.use('/showcase', adminShowcaseRouter)
 adminRouter.use('/messaging', adminMessageRouter)
 adminRouter.use('/reviews', adminReviewRouter)

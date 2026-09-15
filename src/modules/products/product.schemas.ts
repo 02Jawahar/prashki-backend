@@ -4,6 +4,9 @@ import { z } from 'zod'
 export const publicListQuery = z.object({
   q: z.string().trim().max(120).optional(),
   category: z.string().trim().max(120).optional(),
+  /// A seasonal drop's slug, e.g. "rangrez". Independent of category: a piece
+  /// belongs to one category and to as many collections as carried it.
+  collection: z.string().trim().max(140).optional(),
   minPrice: z.coerce.number().int().min(0).optional(),
   maxPrice: z.coerce.number().int().min(0).optional(),
   inStock: z

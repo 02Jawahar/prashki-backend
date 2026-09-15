@@ -53,6 +53,12 @@ function buildWhere(
     })
   }
 
+  if (q.collection) {
+    // Only live drops are browsable — a draft collection's slug should behave
+    // as though it does not exist rather than leaking its line-up early.
+    and.push({ collections: { some: { collection: { slug: q.collection, status: 'ACTIVE' } } } })
+  }
+
   if (q.minPrice !== undefined) and.push({ price: { gte: q.minPrice } })
   if (q.maxPrice !== undefined) and.push({ price: { lte: q.maxPrice } })
 

@@ -66,17 +66,18 @@ model User {
   auditLogs     AuditLog[]
   statusChanges OrderStatusHistory[]
 
-  passwordResets   PasswordResetToken[]
-  consents         Consent[]
-  wishlist         WishlistItem[]
-  reviews          Review[]
-  notifications    Notification[]
+  passwordResets    PasswordResetToken[]
+  consents          Consent[]
+  wishlist          WishlistItem[]
+  reviews           Review[]
+  notifications     Notification[]
   notificationPrefs NotificationPreference[]
-  returnRequests   ReturnRequest[]
+  returnRequests    ReturnRequest[]
   couponRedemptions CouponRedemption[]
-  checkoutSessions CheckoutSession[]
-  internalNotes    CustomerNote[]        @relation("CustomerNoteSubject")
-  authoredNotes    CustomerNote[]        @relation("CustomerNoteAuthor")
+  checkoutSessions  CheckoutSession[]
+  giftCards         GiftCard[]
+  internalNotes     CustomerNote[]           @relation("CustomerNoteSubject")
+  authoredNotes     CustomerNote[]           @relation("CustomerNoteAuthor")
 
   @@index([role, status])
   @@index([createdAt])
@@ -165,23 +166,23 @@ enum CategoryStatus {
 /// `parentId` is present from day one so categories can become hierarchical
 /// without a migration, even though the first admin UI is single-level.
 model Category {
-  id          String         @id @default(cuid())
-  name        String
-  slug        String         @unique
-  description String?
-  image       String?
-  status      CategoryStatus @default(ACTIVE)
-  sortOrder   Int            @default(0)
-  parentId    String?
+  id             String         @id @default(cuid())
+  name           String
+  slug           String         @unique
+  description    String?
+  image          String?
+  status         CategoryStatus @default(ACTIVE)
+  sortOrder      Int            @default(0)
+  parentId       String?
   /// Per-page SEO overrides; fall back to name/description when unset.
   seoTitle       String?
   seoDescription String?
-  seoNoindex     Boolean     @default(false)
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  seoNoindex     Boolean        @default(false)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
-  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children Category[] @relation("CategoryTree")
+  parent   Category?        @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[]       @relation("CategoryTree")
   products Product[]
   coupons  CouponCategory[]
 
@@ -231,16 +232,17 @@ model Product {
   ratingAverage Float @default(0)
   ratingCount   Int   @default(0)
 
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  category Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  variants ProductVariant[]
-  images   ProductImage[]
-  reviews  Review[]
-  wishlist WishlistItem[]
-  coupons  CouponProduct[]
-  showcase ShowcaseProduct[]
+  category    Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  variants    ProductVariant[]
+  images      ProductImage[]
+  reviews     Review[]
+  wishlist    WishlistItem[]
+  coupons     CouponProduct[]
+  showcase    ShowcaseProduct[]
+  collections CollectionProduct[]
 
   @@index([status])
   @@index([categoryId])
@@ -258,20 +260,20 @@ enum VariantStatus {
 /// "Default" variant). That keeps cart lines, order lines and inventory keyed
 /// off one thing instead of branching on whether variants exist.
 model ProductVariant {
-  id        String        @id @default(cuid())
-  productId String
-  name      String
-  sku       String        @unique
+  id          String        @id @default(cuid())
+  productId   String
+  name        String
+  sku         String        @unique
   /// paise; null means inherit Product.price
-  price     Int?
+  price       Int?
   /// Shipping weight. Null falls back to the store-wide default in settings.
   weightGrams Int?
-  status    VariantStatus @default(ACTIVE)
-  position  Int           @default(0)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  status      VariantStatus @default(ACTIVE)
+  position    Int           @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
-  product    Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product    Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
   inventory  Inventory?
   cartItems  CartItem[]
   orderItems OrderItem[]
@@ -331,20 +333,20 @@ model Inventory {
 }
 
 model InventoryMovement {
-  id          String                @id @default(cuid())
-  inventoryId String
-  type        InventoryMovementType
+  id            String                @id @default(cuid())
+  inventoryId   String
+  type          InventoryMovementType
   /// Signed: negative for SALE and DAMAGE, positive for restocks.
-  quantity    Int
+  quantity      Int
   /// Stock level after applying this movement — makes the ledger auditable
   /// without replaying the whole history.
-  balanceAfter Int
-  reason      String?
+  balanceAfter  Int
+  reason        String?
   /// Loose link to whatever caused it, e.g. ("ORDER", orderId).
   referenceType String?
   referenceId   String?
   createdById   String?
-  createdAt     DateTime            @default(now())
+  createdAt     DateTime              @default(now())
 
   inventory Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
 
@@ -386,15 +388,15 @@ model Address {
 /// A cart is either a guest cart (token only) or a user cart (userId set).
 /// On login the guest cart is merged into the user's cart and then discarded.
 model Cart {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  userId    String?  @unique
+  id         String   @id @default(cuid())
+  token      String   @unique
+  userId     String?  @unique
   /// The code the shopper typed, not the discount. The amount is always
   /// re-derived from the Coupon row, so an edited or expired coupon takes
   /// effect immediately rather than being frozen into the cart.
   couponCode String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   user  User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
   items CartItem[]
@@ -455,28 +457,38 @@ model Order {
   couponId   String?
   couponCode String?
 
+  /**
+   * Gift card applied at checkout, in paise, with the code snapshotted for the
+   * same reason as the coupon's. This is payment, not discount: it comes off
+   * what is owed after tax rather than off the goods value, so the tax on a
+   * part-gifted order matches the tax on the same order paid in full.
+   */
+  giftCardId     String?
+  giftCardCode   String?
+  giftCardAmount Int     @default(0)
+
   /// Chosen shipping method, snapshotted for the same reason.
   shippingMethodId   String?
   shippingMethodName String?
 
   /// Customer-facing note left at checkout.
-  notes String?
+  notes         String?
   /// Staff-only; never returned on customer endpoints.
   internalNotes String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user          User                 @relation(fields: [userId], references: [id])
-  items         OrderItem[]
-  statusHistory OrderStatusHistory[]
-  payments      Payment[]
-  shipments     Shipment[]
-  returnRequests ReturnRequest[]
-  refunds       Refund[]
-  coupon        Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
-  redemption    CouponRedemption?
-  shippingMethod ShippingMethod?     @relation(fields: [shippingMethodId], references: [id], onDelete: SetNull)
+  user            User                 @relation(fields: [userId], references: [id])
+  items           OrderItem[]
+  statusHistory   OrderStatusHistory[]
+  payments        Payment[]
+  shipments       Shipment[]
+  returnRequests  ReturnRequest[]
+  refunds         Refund[]
+  coupon          Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  redemption      CouponRedemption?
+  shippingMethod  ShippingMethod?      @relation(fields: [shippingMethodId], references: [id], onDelete: SetNull)
   checkoutSession CheckoutSession?
 
   @@index([userId])
@@ -676,14 +688,14 @@ model AuditLog {
 // ============================================================================
 
 model Attribute {
-  id           String  @id @default(cuid())
-  name         String  @unique
-  slug         String  @unique
+  id           String   @id @default(cuid())
+  name         String   @unique
+  slug         String   @unique
   /// Rendered as swatches when true (colour), as chips otherwise (size).
-  isSwatch     Boolean @default(false)
+  isSwatch     Boolean  @default(false)
   /// Exposed as a storefront filter.
-  isFilterable Boolean @default(true)
-  position     Int     @default(0)
+  isFilterable Boolean  @default(true)
+  position     Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -851,14 +863,13 @@ model ShippingZone {
 
   /**
    * Serviceability (FR-21.1).
-   *
    * When false, an address matching this zone is explicitly NOT deliverable —
    * the zone exists to say no. Because zones are matched in `position` order,
    * a narrow non-serviceable zone at position 0 beats the broad default zone
    * behind it, which is how a PIN blocklist is expressed without a second
    * matching mechanism.
    */
-  isServiceable Boolean @default(true)
+  isServiceable        Boolean @default(true)
   /// Shown to the customer when this zone refuses delivery.
   unserviceableMessage String?
 
@@ -879,22 +890,22 @@ model ShippingMethod {
   description String?
 
   /// Flat rate in paise. Free shipping is simply 0.
-  rate        Int  @default(0)
+  rate           Int  @default(0)
   /// Cart subtotal at or above which this method costs nothing. Null = never.
-  freeAbove   Int?
+  freeAbove      Int?
   /// Order subtotal bounds for this method to be offered at all, in paise.
-  minSubtotal Int?
-  maxSubtotal Int?
+  minSubtotal    Int?
+  maxSubtotal    Int?
   /// Shown to the customer as "3–5 business days".
-  minDays     Int?
-  maxDays     Int?
+  minDays        Int?
+  maxDays        Int?
   /// Parcel weight this method cannot carry, in grams. Null = no limit.
   /// A basket heavier than this is not offered the method at all (FR-21.2).
   maxWeightGrams Int?
 
   /// Cash on delivery is a shipping method with an extra fee attached.
-  isCod       Boolean @default(false)
-  codFee      Int     @default(0)
+  isCod  Boolean @default(false)
+  codFee Int     @default(0)
 
   /**
    * Which adapter creates shipments for this method. Null means the parcel is
@@ -918,16 +929,14 @@ model ShippingMethod {
 
 /**
  * A rate band (FR-21.2).
- *
  * `ShippingMethod.rate` is the flat fallback. When a method has bands, the
  * first band matching the parcel's weight and the basket's value wins, which
  * is how "under 500g costs ₹60, up to 2kg costs ₹120" is expressed.
- *
  * Bounds are inclusive-lower, exclusive-upper, so adjacent bands can share an
  * edge without overlapping. Null means unbounded on that side.
  */
 model ShippingRate {
-  id       String @id @default(cuid())
+  id       String  @id @default(cuid())
   methodId String
   /// Human label for the admin table, e.g. "Up to 500 g".
   label    String?
@@ -1005,7 +1014,6 @@ model Shipment {
 
   /**
    * Paise the courier collects on delivery (FR-21.4).
-   *
    * Zero for a prepaid parcel, and zero for every parcel of a split COD order
    * except the one carrying the collection — the courier collects the order
    * total once, not once per box. Stored rather than derived so an operator can
@@ -1028,8 +1036,8 @@ model Shipment {
    * an operator is asked to look (M09: out-of-order events cannot move a
    * delivered shipment backwards without review).
    */
-  needsReview   Boolean @default(false)
-  reviewReason  String?
+  needsReview  Boolean @default(false)
+  reviewReason String?
 
   notes     String?
   createdAt DateTime @default(now())
@@ -1070,16 +1078,15 @@ model ShipmentEvent {
 
   /**
    * Carrier event provenance (FR-21.5).
-   *
    * `providerEventId` is unique, so a redelivered callback collides on insert
    * and becomes a no-op — the same mechanism the payment webhook uses.
    * `providerStatus` keeps the carrier's own wording, because a mapping that
    * turns out to be wrong is only debuggable if the original survived.
    */
-  providerEventId String? @unique
-  providerStatus  String?
+  providerEventId  String? @unique
+  providerStatus   String?
   /// "manual" | "provider" | "system"
-  source          String  @default("manual")
+  source           String  @default("manual")
   /// True when this event was recorded but deliberately did not move the
   /// shipment, because it arrived out of order.
   ignoredForStatus Boolean @default(false)
@@ -1201,18 +1208,18 @@ model ReturnStatusHistory {
 /// A refund is money leaving, so it is recorded independently of the return
 /// that caused it — admins can also refund an order outright.
 model Refund {
-  id              String  @id @default(cuid())
-  orderId         String
-  returnRequestId String?
+  id               String  @id @default(cuid())
+  orderId          String
+  returnRequestId  String?
   /// The gateway refund id, e.g. Razorpay's rfnd_… . Unique so a retried
   /// webhook cannot record the same refund twice.
   providerRefundId String? @unique
   provider         String
 
-  amount   Int
-  currency String       @default("INR")
-  status   RefundStatus @default(PENDING)
-  reason   String?
+  amount     Int
+  currency   String       @default("INR")
+  status     RefundStatus @default(PENDING)
+  reason     String?
   /// Gateway response, secrets stripped.
   rawPayload Json?
 
@@ -1354,20 +1361,20 @@ model NotificationPreference {
 /// Editable templates so copy changes do not need a deploy. {{variables}} are
 /// substituted server-side; the allowed set is per-template.
 model MessageTemplate {
-  id      String         @id @default(cuid())
-  key     String
-  channel MessageChannel
-  name    String
+  id                 String         @id @default(cuid())
+  key                String
+  channel            MessageChannel
+  name               String
   /// Email only.
-  subject String?
-  body    String
+  subject            String?
+  body               String
   /// Provider-approved template name for WhatsApp/SMS.
   providerTemplateId String?
   /// Documents the placeholders this template accepts.
-  variables String[]
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  variables          String[]
+  isActive           Boolean        @default(true)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   logs MessageLog[]
 
@@ -1459,12 +1466,12 @@ model Page {
 
 /// Immutable snapshot taken before each save, so admins can roll back.
 model PageRevision {
-  id      String @id @default(cuid())
-  pageId  String
+  id          String   @id @default(cuid())
+  pageId      String
   /// Monotonic per page.
-  version Int
-  title   String
-  blocks  Json
+  version     Int
+  title       String
+  blocks      Json
   /// Null when the revision was created by a system process.
   createdById String?
   note        String?
@@ -1479,10 +1486,10 @@ model PageRevision {
 
 /// URL redirects, so renaming a product slug does not strand inbound links.
 model Redirect {
-  id       String @id @default(cuid())
+  id         String    @id @default(cuid())
   /// Path only, leading slash, no host: "/old-product".
-  fromPath String @unique
-  toPath   String
+  fromPath   String    @unique
+  toPath     String
   /// 301 or 302.
   statusCode Int       @default(301)
   isActive   Boolean   @default(true)
@@ -1509,10 +1516,10 @@ model Consent {
   /// Ties pre-login consent to a browser.
   anonymousId String?
   /// "cookies.analytics", "marketing.email", "terms", "privacy".
-  type    String
-  granted Boolean
+  type        String
+  granted     Boolean
   /// Policy version the customer agreed to.
-  version String?
+  version     String?
 
   ip        String?
   userAgent String?
@@ -1595,7 +1602,7 @@ model CustomerNote {
 /// denormalised and index-light: written on nearly every request, read only by
 /// scheduled report queries.
 model AnalyticsEvent {
-  id          String  @id @default(cuid())
+  id          String   @id @default(cuid())
   /// "product.view", "search", "cart.add", "checkout.start".
   type        String
   userId      String?
@@ -1629,6 +1636,152 @@ enum ShowcaseMediaType {
   IMAGE
 }
 
+enum GiftCardStatus {
+  /// Bought but not yet paid for. Carries no spendable balance.
+  PENDING
+  ACTIVE
+  /// Balance reached zero.
+  REDEEMED
+  EXPIRED
+  CANCELLED
+}
+
+/// Stored value bought by one person and spent by another.
+///
+/// The balance is a column and every movement is also a row in the ledger
+/// below. That is redundant on purpose: the column is what checkout reads on
+/// every request, and the ledger is what answers "where did the money go" when
+/// a customer says a card should still have something on it. A balance with no
+/// ledger behind it is unanswerable, and a ledger summed on every read is a
+/// table scan in the checkout path.
+model GiftCard {
+  id   String @id @default(cuid())
+  /// Shown to the customer, e.g. PK-7Q4M-2XKD. Unique, and never reused.
+  code String @unique
+
+  /// paise. `initialValue` never changes; `balance` is what is left.
+  initialValue Int
+  balance      Int
+
+  currency String         @default("INR")
+  status   GiftCardStatus @default(PENDING)
+
+  /// Who bought it. Null for one issued by hand from the admin.
+  purchaserId    String?
+  /// Where it was sent. Kept even after redemption — it is the record of who
+  /// was given it, which a refund conversation needs.
+  recipientName  String?
+  recipientEmail String?
+  message        String?
+
+  /// The order that paid for it. Null for an admin-issued card.
+  orderId String?
+
+  /// Null never expires. Indian gift cards commonly run three years.
+  expiresAt DateTime?
+  issuedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  purchaser    User?                 @relation(fields: [purchaserId], references: [id], onDelete: SetNull)
+  transactions GiftCardTransaction[]
+
+  @@index([status])
+  @@index([purchaserId])
+  @@index([orderId])
+  @@map("gift_cards")
+}
+
+enum GiftCardTransactionType {
+  ISSUE
+  REDEEM
+  /// Money put back after a cancelled or refunded order.
+  REFUND
+  ADJUST
+}
+
+/// Append-only. Rows are never updated or deleted — a correction is another
+/// row, the same rule the inventory ledger follows.
+model GiftCardTransaction {
+  id         String                  @id @default(cuid())
+  giftCardId String
+  type       GiftCardTransactionType
+  /// paise. Positive adds to the balance, negative takes from it.
+  amount     Int
+  /// The balance after this row, so a statement needs no running total.
+  balanceAfter Int
+
+  /// What caused it. An order id for a redemption.
+  orderId String?
+  note    String?
+  /// Null for a customer's own redemption at checkout.
+  actorId String?
+
+  createdAt DateTime @default(now())
+
+  giftCard GiftCard @relation(fields: [giftCardId], references: [id], onDelete: Cascade)
+
+  @@index([giftCardId, createdAt])
+  @@index([orderId])
+  @@map("gift_card_transactions")
+}
+
+enum CollectionStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+/// A seasonal drop — RANGREZ, RANG 2026 — as shown on the Discover page.
+///
+/// Deliberately not a Category. A category is what a garment *is* (a lehenga, a
+/// short dress) and a product has exactly one; a collection is when it was
+/// made, and the same lehenga belongs to a category and to however many
+/// collections it is carried in. Folding the two together would force a choice
+/// between browsing by type and browsing by season, and the storefront needs
+/// both.
+model Collection {
+  id          String           @id @default(cuid())
+  name        String
+  slug        String           @unique
+  /// Shown beside the name on Discover, e.g. 2026. Not a date: a drop is known
+  /// by its year, and storing a day implies a precision nobody has.
+  year        Int?
+  description String?
+  /// The tile on Discover. A collection without one is a gap in the grid.
+  coverImage  String?
+  status      CollectionStatus @default(DRAFT)
+  /// Lower first. Discover runs newest to oldest, which is position, not date.
+  position    Int              @default(0)
+
+  seoTitle       String?
+  seoDescription String?
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  products CollectionProduct[]
+
+  @@index([status, position])
+  @@map("collections")
+}
+
+/// Join row. Carries its own position so a collection can be ordered as a
+/// lookbook rather than inheriting the catalogue's order.
+model CollectionProduct {
+  collectionId String
+  productId    String
+  position     Int    @default(0)
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  product    Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, productId])
+  @@index([productId])
+  @@map("collection_products")
+}
+
 /// A customer's photo or video of themselves in a piece, shown on the
 /// storefront as social proof.
 ///
@@ -1660,11 +1813,11 @@ model ShowcaseItem {
 
   /// Display name, e.g. "Ananya R." Kept short and first-name-plus-initial by
   /// convention; the admin form says so.
-  creditName String?
+  creditName   String?
   /// Social handle without the @.
   creditHandle String?
   /// Where it came from, so the permission can be traced back to a real post.
-  sourceUrl String?
+  sourceUrl    String?
 
   /// When permission to use this was obtained.
   ///
@@ -1674,13 +1827,13 @@ model ShowcaseItem {
   consentGrantedAt DateTime?
   /// How permission was given — "replied to our comment 12 Aug", "DM screenshot
   /// on file". The evidence, in one line.
-  consentNote String?
+  consentNote      String?
 
   status       ShowcaseStatus @default(DRAFT)
   scheduledFor DateTime?
   publishedAt  DateTime?
   /// Ascending. Ties break on createdAt so the order is always total.
-  position Int @default(0)
+  position     Int            @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

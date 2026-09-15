@@ -281,7 +281,13 @@ let liveId = null
 }
 
 {
-  const r = await call('/showcase')
+  /*
+   * The maximum the wall will return, not the default. The suite has to find
+   * the item it just made, and on a store with a real showcase the default
+   * twelve is filled by items that were there first — which failed here as
+   * "the live item is not on the wall" when the wall was working perfectly.
+   */
+  const r = await call('/showcase?limit=24')
   check('the wall is public', r.status === 200, `status ${r.status}`)
 
   const items = r.json?.data?.items ?? []
@@ -332,7 +338,7 @@ let liveId = null
 section('Storefront  A piece that is not for sale drops out of the look')
 
 if (product) {
-  const before = await call('/showcase')
+  const before = await call('/showcase?limit=24')
   const withProduct = (before.json?.data?.items ?? []).find((i) => i.id === liveId)
   check('the look has the product to begin with', withProduct?.products?.length === 1)
 
@@ -342,7 +348,7 @@ if (product) {
     body: { status: 'DRAFT' },
   })
 
-  const after = await call('/showcase')
+  const after = await call('/showcase?limit=24')
   const without = (after.json?.data?.items ?? []).find((i) => i.id === liveId)
   check(
     'unpublishing the product removes it from the look',

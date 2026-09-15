@@ -99,6 +99,16 @@ export const MESSAGE_EVENTS: MessageEvent[] = [
     transactional: true,
   },
   {
+    key: 'giftcard.issued',
+    label: 'Gift card',
+    description: 'A gift card is paid for and sent to its recipient.',
+    // Email only. The code is money, and the recipient is usually not a
+    // customer — we have their email because the buyer typed it, and nothing
+    // else.
+    channels: ['EMAIL'],
+    transactional: true,
+  },
+  {
     key: 'refund.issued',
     label: 'Refund issued',
     description: 'Money is sent back.',

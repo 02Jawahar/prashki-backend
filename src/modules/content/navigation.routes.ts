@@ -22,17 +22,21 @@ import { recordAudit } from '../../utils/audit.js'
  */
 
 /**
- * Three levels, matching what the header can actually draw:
+ * Four levels, matching what the header can actually draw:
  *
  *   Ready to Wear              a top-level item
- *     Women's                  a column heading in the mega menu
- *       Luxury Pret            a link in that column
+ *     Women's                  a column in the mega menu
+ *       Luxury Pret            a group heading inside that column
+ *         Salwar Suits         a link in that group
  *
- * The limit is enforced rather than left to the renderer. A fourth level saved
+ * The limit is enforced rather than left to the renderer. A fifth level saved
  * happily and then silently vanished from the menu would be indistinguishable
  * from a bug, and the admin would have no way to tell which of the two it was.
+ *
+ * Four is where it stops for a reason that is visual, not technical: a column
+ * deep enough to need a fifth level is taller than the dropdown it lives in.
  */
-const MAX_DEPTH = 3
+const MAX_DEPTH = 4
 
 const leaf = z.object({
   label: z.string().trim().min(1).max(60),

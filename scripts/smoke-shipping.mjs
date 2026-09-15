@@ -215,11 +215,28 @@ section('FR-21.2  Eligible methods and estimates for address, cart and parcel')
 
 let variant = null
 {
+  /*
+   * Searched across the listing rather than taken from the first product.
+   * Every order this suite places consumes stock, so on a store that has been
+   * exercised the first product is eventually picked clean and the run dies on
+   * a null variant — which reads as "no purchasable variant exists" when the
+   * catalogue is full of them.
+   */
   const listing = await call('/products?perPage=12&inStock=true')
-  const slug = listing.json?.data?.products?.[0]?.slug
-  const detail = await call(`/products/${slug}`)
-  variant = detail.json?.data?.product?.variants?.find((v) => v.stock > 3) ?? null
-  check('a purchasable variant is available', Boolean(variant))
+  for (const candidate of listing.json?.data?.products ?? []) {
+    const detail = await call(`/products/${candidate.slug}`)
+    const found = detail.json?.data?.product?.variants?.find((v) => v.stock > 3)
+    if (found) {
+      variant = found
+      break
+    }
+  }
+  check('a purchasable variant is available', Boolean(variant), variant?.sku)
+
+  if (!variant) {
+    console.log('  Nothing in stock to test with — restock or reseed.')
+    process.exit(1)
+  }
 
   await call('/cart/items', { method: 'POST', jar: customer, body: { variantId: variant.id, quantity: 1 } })
 }
@@ -251,13 +268,42 @@ let metroMethods = []
 }
 
 {
-  // Weight drives the band: one unit is under 2 kg, twelve is well over 5 kg.
+  // Weight drives the band: one unit is under 2 kg, several are over it.
+
+  /*
+   * Back to one first. The cart survives between runs, so on a second pass the
+   * "light" parcel was already the heavy one from last time and the comparison
+   * quietly became five units against five units.
+   */
+  const startItem = (await call('/cart', { jar: customer })).json?.data?.cart?.items?.[0]
+  if (startItem) {
+    await call(`/cart/items/${startItem.id}`, { method: 'PATCH', jar: customer, body: { quantity: 1 } })
+  }
+
   const light = await call('/shipping/quote?country=IN&state=Delhi&postalCode=110003', { jar: customer })
   const lightRate = (light.json?.data?.methods ?? []).find((m) => m.name === 'Standard delivery')?.rate
   const lightWeight = light.json?.data?.weightGrams
 
+  /*
+   * Twelve if the shelf allows it, otherwise as many as there are. A fixed
+   * quantity makes this a test of the seed's stock levels rather than of the
+   * weight calculation: on a real catalogue the update is refused, the cart
+   * stays at one, and the suite reports that weight does not scale when it
+   * does.
+   */
   const item = (await call('/cart', { jar: customer })).json?.data?.cart?.items?.[0]
-  await call(`/cart/items/${item.id}`, { method: 'PATCH', jar: customer, body: { quantity: 12 } })
+  let quantity = 12
+  for (const attempt of [12, 8, 5, 3, 2]) {
+    const r = await call(`/cart/items/${item.id}`, {
+      method: 'PATCH', jar: customer, body: { quantity: attempt },
+    })
+    if (r.status === 200) {
+      quantity = attempt
+      break
+    }
+    quantity = 1
+  }
+  check('the cart can hold more than one', quantity > 1, `${quantity} units`)
 
   const heavy = await call('/shipping/quote?country=IN&state=Delhi&postalCode=110003', { jar: customer })
   const heavyRate = (heavy.json?.data?.methods ?? []).find((m) => m.name === 'Standard delivery')?.rate

@@ -28,6 +28,8 @@ const createSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(200).optional(),
   /** Chosen from GET /shipping/quote. Re-validated server-side. */
   shippingMethodId: z.string().trim().min(1).optional(),
+  /** A gift card code. Re-checked server-side; never trusted for its value. */
+  giftCardCode: z.string().trim().min(4).max(40).optional(),
 })
 
 const listQuery = z.object({
@@ -44,6 +46,7 @@ orderRouter.post('/', writeLimiter, validate({ body: createSchema }), async (req
     notes: input.notes,
     idempotencyKey: input.idempotencyKey,
     shippingMethodId: input.shippingMethodId,
+    giftCardCode: input.giftCardCode,
   })
 
   // A replay is the same order coming back, not a new one — auditing and

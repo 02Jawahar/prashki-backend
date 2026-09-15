@@ -5,6 +5,7 @@ import { env } from '../../config/env.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { percentOf } from '../../utils/money.js'
 import { emit } from '../../events/bus.js'
+import { findSpendable, redeem as redeemGiftCard } from '../giftcards/giftcard.service.js'
 import { recordAudit } from '../../utils/audit.js'
 import { evaluateCoupon, recordRedemption, releaseRedemption } from '../coupons/coupon.service.js'
 import { priceChosenMethod } from '../shipping/shipping.service.js'
@@ -22,6 +23,8 @@ import { priceChosenMethod } from '../shipping/shipping.service.js'
  */
 
 export interface CreateOrderInput {
+  /** A gift card code the customer entered at checkout. */
+  giftCardCode?: string | null
   userId: string
   addressId: string
   notes?: string
@@ -198,6 +201,14 @@ export async function createOrder(input: CreateOrderInput) {
       const tax = percentOf(subtotal - discount, charges.taxPercent)
       const total = subtotal - discount + shipping + tax
 
+      /**
+       * A gift card is payment, not discount. It comes off what is owed after
+       * tax rather than off the goods value, so the tax on a part-gifted order
+       * is the same as on the identical order paid in full — which is what the
+       * tax actually is. Treating it as a discount would quietly under-collect.
+       */
+      const card = input.giftCardCode ? await findSpendable(input.giftCardCode) : null
+
       const order = await tx.order.create({
         data: {
           orderNumber: await nextOrderNumber(tx),
@@ -213,6 +224,7 @@ export async function createOrder(input: CreateOrderInput) {
           ...(evaluation
             ? { couponId: evaluation.coupon.id, couponCode: evaluation.coupon.code }
             : {}),
+          ...(card ? { giftCardId: card.id, giftCardCode: card.code } : {}),
           ...(quote ? { shippingMethodId: quote.id, shippingMethodName: quote.name } : {}),
           // Frozen copy — the address row may be edited or deleted later.
           shippingAddressSnapshot: {
@@ -232,6 +244,21 @@ export async function createOrder(input: CreateOrderInput) {
         },
         include: { items: true },
       })
+
+      /**
+       * Redeemed inside the same transaction that created the order. If either
+       * fails, both roll back — the alternative is a customer whose card is
+       * empty and whose order does not exist.
+       *
+       * `redeem` returns what it could actually take, which may be less than
+       * the total: a card smaller than the order pays what it has and the rest
+       * is owed at the gateway.
+       */
+      if (card) {
+        const applied = await redeemGiftCard(tx, card.id, total, order.id)
+        await tx.order.update({ where: { id: order.id }, data: { giftCardAmount: applied } })
+        order.giftCardAmount = applied
+      }
 
       // ---- consume stock, with a ledger entry for each movement ----
       for (const item of cart.items) {
@@ -406,6 +433,55 @@ export async function createOrderIdempotent(
 }
 
 /** Restores stock for a cancelled order, once. */
+
+/**
+ * Puts a cancelled order's gift card money back, inside the caller's
+ * transaction.
+ *
+ * Separate from `refundToCard` in the gift card service, which opens its own
+ * transaction for use from a webhook. Here the credit has to share the
+ * cancellation's transaction or a rolled-back cancel would leave the card
+ * credited for an order that is still live.
+ */
+async function restoreGiftCard(
+  tx: Prisma.TransactionClient,
+  order: { id: string; giftCardId: string | null; giftCardAmount: number; orderNumber: string },
+  actorId: string | null,
+): Promise<void> {
+  if (!order.giftCardId) return
+
+  const alreadyBack = await tx.giftCardTransaction.count({
+    where: { orderId: order.id, type: 'REFUND' },
+  })
+  if (alreadyBack > 0) return
+
+  const card = await tx.giftCard.findUnique({ where: { id: order.giftCardId } })
+  if (!card) return
+
+  const balanceAfter = card.balance + order.giftCardAmount
+
+  await tx.giftCard.update({
+    where: { id: card.id },
+    data: {
+      balance: balanceAfter,
+      // A card emptied by this order becomes spendable again.
+      status: card.status === 'REDEEMED' ? 'ACTIVE' : card.status,
+    },
+  })
+
+  await tx.giftCardTransaction.create({
+    data: {
+      giftCardId: card.id,
+      type: 'REFUND',
+      amount: order.giftCardAmount,
+      balanceAfter,
+      orderId: order.id,
+      actorId,
+      note: `Cancelled order ${order.orderNumber}`,
+    },
+  })
+}
+
 export async function cancelOrder(orderId: string, actorId: string | null, note?: string) {
   return prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
@@ -445,6 +521,19 @@ export async function cancelOrder(orderId: string, actorId: string | null, note?
     // A cancelled order gives its coupon use back, so a customer whose order
     // fell through is not left having spent a single-use code on nothing.
     await releaseRedemption(tx, orderId)
+
+    /**
+     * And the same for a gift card. This is the customer's money rather than a
+     * discount, so losing it to a cancellation would be taking it — the ledger
+     * entry is what proves it went back.
+     *
+     * Inside the transaction, so the cancellation and the credit stand or fall
+     * together. It is idempotent on the order, because a cancel that is
+     * retried must not pay the card twice.
+     */
+    if (order.giftCardId && order.giftCardAmount > 0) {
+      await restoreGiftCard(tx, order, actorId)
+    }
 
     const updated = await tx.order.update({
       where: { id: orderId },
@@ -517,6 +606,25 @@ export async function updateOrderStatus(
     metadata: { from: order.status, to: next },
   })
 
+  /**
+   * Marking an order paid by hand is a real payment — cash on delivery, a bank
+   * transfer, a card taken over the phone — so it fires the same event the
+   * gateway does. Without this the customer gets no confirmation and a gift
+   * card bought that way is never activated, which was exactly the symptom:
+   * the order said PAID and the card sat PENDING for ever.
+   *
+   * `markOrderPaid` in the payment service emits this for the gateway path and
+   * is idempotent on an already-paid order, so the two cannot both fire: this
+   * branch only runs on a transition *into* PAID.
+   */
+  if (next === 'PAID') {
+    emit('ORDER_PAID', {
+      orderId,
+      orderNumber: updated.orderNumber,
+      userId: updated.userId,
+      total: updated.total,
+    })
+  }
   if (next === 'SHIPPED') emit('ORDER_SHIPPED', { orderId, orderNumber: updated.orderNumber })
   if (next === 'DELIVERED') emit('ORDER_DELIVERED', { orderId, orderNumber: updated.orderNumber })
 
