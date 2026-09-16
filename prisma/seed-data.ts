@@ -177,6 +177,13 @@ export const DEFAULT_SETTINGS: Array<{
   { key: 'shipping.free_threshold', value: '0', type: 'NUMBER', group: 'checkout', label: 'Free shipping above (paise)' },
   { key: 'nav.main', value: '[]', type: 'JSON', group: 'navigation', label: 'Main navigation' },
   { key: 'home.sections', value: '[]', type: 'JSON', group: 'homepage', label: 'Homepage sections' },
+  /**
+   * Seeded empty on purpose: the gift card service falls back to its own
+   * defaults when this row is blank, so an untouched store and a store whose
+   * settings row was never written behave identically. Admin fills it the
+   * first time someone saves the page.
+   */
+  { key: 'giftcard.config', value: '', type: 'JSON', group: 'giftcards', label: 'Gift card page' },
 ]
 
 /**

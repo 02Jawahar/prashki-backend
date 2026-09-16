@@ -281,5 +281,83 @@ section('Authorization')
   check('a customer cannot issue themselves a card', issue.status === 403, `status ${issue.status}`)
 }
 
+// ══════════════════════════════════════════════ page configuration
+section('Page configuration')
+
+{
+  const before = await call('/gift-cards/options')
+  const original = await call('/admin/gift-cards/config/page', { jar: admin })
+  check('admin can read the page config', original.status === 200, `status ${original.status}`)
+
+  const base = original.json?.data?.config
+  check('the config carries amounts and copy',
+    Array.isArray(base?.denominations) && typeof base?.heading === 'string')
+
+  const custEdit = await call('/admin/gift-cards/config/page', {
+    method: 'PUT', jar: customer, body: { ...base, heading: 'Mine now' },
+  })
+  check('a customer cannot change it', custEdit.status === 403, `status ${custEdit.status}`)
+
+  const bad = await call('/admin/gift-cards/config/page', {
+    method: 'PUT', jar: admin, body: { ...base, denominations: [250_050] },
+  })
+  check('part-rupee amounts are refused', bad.status === 422, `status ${bad.status}`)
+
+  const backwards = await call('/admin/gift-cards/config/page', {
+    method: 'PUT', jar: admin, body: { ...base, custom: { min: 900_000, max: 100_000 } },
+  })
+  check('a custom range that runs backwards is refused', backwards.status === 422,
+    `status ${backwards.status}`)
+
+  const saved = await call('/admin/gift-cards/config/page', {
+    method: 'PUT', jar: admin,
+    body: {
+      denominations: [900_000, 300_000, 300_000],
+      custom: { min: 100_000, max: 400_000 },
+      validForYears: 5,
+      heading: 'Smoke card',
+      intro: 'Set by the smoke test.',
+      terms: ['One line.'],
+    },
+  })
+  check('a valid config saves', saved.status === 200, `status ${saved.status}`)
+  check('amounts are sorted and de-duplicated',
+    JSON.stringify(saved.json?.data?.config?.denominations) === JSON.stringify([300_000, 900_000]),
+    JSON.stringify(saved.json?.data?.config?.denominations))
+
+  const after = await call('/gift-cards/options')
+  check('the storefront sees the new copy', after.json?.data?.heading === 'Smoke card',
+    after.json?.data?.heading)
+  check('validity is generated, not typed',
+    after.json?.data?.terms?.[0] === 'Valid for 5 years from the day it is issued.',
+    after.json?.data?.terms?.[0])
+
+  // The point of server-side amounts: an amount no longer offered must stop
+  // being buyable, not merely stop being displayed.
+  const stale = await call('/gift-cards/purchase', {
+    method: 'POST', jar: customer, body: { amount: 1_500_000, sendToMe: true },
+  })
+  check('an amount no longer offered is refused', stale.status === 422, `status ${stale.status}`)
+
+  const allowed = await call('/gift-cards/purchase', {
+    method: 'POST', jar: customer, body: { amount: 300_000, sendToMe: true },
+  })
+  check('a newly offered amount is accepted', allowed.status === 201, `status ${allowed.status}`)
+
+  // Put it back, so re-running this script is not a slow drift of the store.
+  const restore = await call('/admin/gift-cards/config/page', {
+    method: 'PUT', jar: admin,
+    body: {
+      denominations: before.json?.data?.denominations,
+      custom: before.json?.data?.custom,
+      validForYears: before.json?.data?.validForYears,
+      heading: before.json?.data?.heading,
+      intro: before.json?.data?.intro,
+      terms: before.json?.data?.terms?.slice(1) ?? [],
+    },
+  })
+  check('the original config restores', restore.status === 200, `status ${restore.status}`)
+}
+
 console.log(`\n${passed} passed, ${failed} failed\n`)
 process.exit(failed === 0 ? 0 : 1)

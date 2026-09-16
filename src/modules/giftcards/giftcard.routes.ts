@@ -8,9 +8,12 @@ import { created, ok, pageMeta } from '../../utils/response.js'
 import { NotFoundError } from '../../utils/errors.js'
 import { recordAudit } from '../../utils/audit.js'
 import {
-  CUSTOM_MAX,
-  CUSTOM_MIN,
-  DENOMINATIONS,
+  giftCardConfigSchema,
+  readGiftCardConfig,
+  validityLine,
+  writeGiftCardConfig,
+} from './giftcard.config.js'
+import {
   assertPurchasableAmount,
   findSpendable,
   issueGiftCard,
@@ -28,13 +31,23 @@ import {
 export const giftCardRouter: Router = Router()
 
 /** What the gift card page offers. Server-owned, so a posted price is refused. */
-giftCardRouter.get('/options', (_req, res) =>
-  ok(res, {
-    denominations: DENOMINATIONS,
-    custom: { min: CUSTOM_MIN, max: CUSTOM_MAX },
+giftCardRouter.get('/options', async (_req, res) => {
+  const config = await readGiftCardConfig()
+
+  return ok(res, {
+    denominations: config.denominations,
+    custom: config.custom,
     currency: 'INR',
-  }),
-)
+    validForYears: config.validForYears,
+    heading: config.heading,
+    intro: config.intro,
+    /**
+     * Validity first and generated, then whatever the store added. The one
+     * sentence that must agree with `validForYears` is not one anybody types.
+     */
+    terms: [validityLine(config.validForYears), ...config.terms],
+  })
+})
 
 const balanceSchema = z.object({ code: z.string().trim().min(4).max(40) })
 
@@ -229,7 +242,7 @@ adminGiftCardRouter.post(
   validate({ body: issueSchema }),
   async (req, res) => {
     const body = req.validated!.body as z.infer<typeof issueSchema>
-    assertPurchasableAmount(body.amount)
+    await assertPurchasableAmount(body.amount)
 
     const card = await issueGiftCard({
       amount: body.amount,
@@ -304,5 +317,45 @@ adminGiftCardRouter.post(
     })
 
     return ok(res, { giftCard })
+  },
+)
+
+// ------------------------------------------------------- page configuration
+
+/**
+ * What the gift card page offers and says.
+ *
+ * Behind `settings.update` rather than `content.manage`: the copy on this
+ * screen sits beside the amounts the store will sell, and splitting one object
+ * across two permissions would mean a role that can rewrite the terms but not
+ * the prices they describe.
+ */
+adminGiftCardRouter.get('/config/page', requirePermission('settings.read'), async (_req, res) =>
+  ok(res, { config: await readGiftCardConfig() }),
+)
+
+adminGiftCardRouter.put(
+  '/config/page',
+  writeLimiter,
+  requirePermission('settings.update'),
+  validate({ body: giftCardConfigSchema }),
+  async (req, res) => {
+    const config = await writeGiftCardConfig(
+      req.validated!.body as z.infer<typeof giftCardConfigSchema>,
+    )
+
+    recordAudit({
+      req,
+      action: 'GIFT_CARD_CONFIG_UPDATED',
+      entityType: 'Setting',
+      entityId: 'giftcard.config',
+      metadata: {
+        denominations: config.denominations,
+        custom: config.custom,
+        validForYears: config.validForYears,
+      },
+    })
+
+    return ok(res, { config })
   },
 )

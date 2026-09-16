@@ -4,6 +4,7 @@ import { prisma } from '../../config/db.js'
 import { logger } from '../../config/logger.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { nextOrderNumber } from '../orders/order.service.js'
+import { type GiftCardConfig, readGiftCardConfig } from './giftcard.config.js'
 
 /**
  * Gift cards (M13) — stored value bought by one person and spent by another.
@@ -39,33 +40,39 @@ export function generateCode(): string {
 }
 
 /**
- * The denominations offered on the gift card page, in paise.
- *
- * Held here rather than in the page so the server can refuse an amount nobody
- * offered. A price posted from the browser is a number the customer chose.
+ * What may be bought, and for how long it lasts, now live in settings — see
+ * `giftcard.config.ts`. They are read per call rather than held here so an
+ * editor changing an amount in admin changes what the server will accept, not
+ * only what the page displays.
  */
-export const DENOMINATIONS = [200_000, 500_000, 1_000_000, 1_500_000]
-export const CUSTOM_MIN = 50_000
-export const CUSTOM_MAX = 5_000_000
 
-/** Three years, which is the common term for an Indian gift card. */
-const VALID_FOR_YEARS = 3
-
-function expiryFromNow(): Date {
+function expiryFromNow(years: number): Date {
   const at = new Date()
-  at.setFullYear(at.getFullYear() + VALID_FOR_YEARS)
+  at.setFullYear(at.getFullYear() + years)
   return at
 }
 
-export function assertPurchasableAmount(paise: number): void {
+/**
+ * The server decides what a gift card may cost.
+ *
+ * A price posted from the browser is a number the customer chose, and this is
+ * the one endpoint on the site where that would hand out money. Callers that
+ * already hold the config pass it in; the rest read it.
+ */
+export async function assertPurchasableAmount(
+  paise: number,
+  config?: GiftCardConfig,
+): Promise<void> {
   if (!Number.isInteger(paise)) {
     throw new ValidationError('That is not a valid amount')
   }
-  if (DENOMINATIONS.includes(paise)) return
 
-  if (paise < CUSTOM_MIN || paise > CUSTOM_MAX) {
+  const { denominations, custom } = config ?? (await readGiftCardConfig())
+  if (denominations.includes(paise)) return
+
+  if (paise < custom.min || paise > custom.max) {
     throw new ValidationError(
-      `A gift card can be between ₹${(CUSTOM_MIN / 100).toLocaleString('en-IN')} and ₹${(CUSTOM_MAX / 100).toLocaleString('en-IN')}`,
+      `A gift card can be between ₹${(custom.min / 100).toLocaleString('en-IN')} and ₹${(custom.max / 100).toLocaleString('en-IN')}`,
       { code: 'AMOUNT_OUT_OF_RANGE' },
     )
   }
@@ -90,9 +97,10 @@ export interface IssueInput {
 }
 
 export async function issueGiftCard(input: IssueInput) {
-  assertPurchasableAmount(input.amount)
+  const config = await readGiftCardConfig()
+  await assertPurchasableAmount(input.amount, config)
 
-  const expiresAt = expiryFromNow()
+  const expiresAt = expiryFromNow(config.validForYears)
 
   /**
    * Retried rather than assumed unique. The odds of a collision are tiny, but
@@ -167,7 +175,8 @@ export interface PurchaseInput {
  * Taxing it here would tax the same rupee twice.
  */
 export async function purchaseGiftCard(input: PurchaseInput) {
-  assertPurchasableAmount(input.amount)
+  const config = await readGiftCardConfig()
+  await assertPurchasableAmount(input.amount, config)
 
   return prisma.$transaction(async (tx) => {
     const orderNumber = await nextOrderNumber(tx)
@@ -229,7 +238,7 @@ export async function purchaseGiftCard(input: PurchaseInput) {
         recipientEmail: input.recipientEmail ?? null,
         message: input.message ?? null,
         orderId: order.id,
-        expiresAt: expiryFromNow(),
+        expiresAt: expiryFromNow(config.validForYears),
       },
     })
 
