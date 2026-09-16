@@ -39,19 +39,84 @@ const publicSelect = {
 
 export const collectionRouter: Router = Router()
 
-/** The Discover grid. */
+/**
+ * The Discover page.
+ *
+ * Each collection comes back with the ranges it actually contains, and a photo
+ * for each — because Discover is a way into the clothes, and a row of range
+ * names with no pictures is a table of contents.
+ *
+ * The photo is the category's own image when someone has set one, and falls
+ * back to a piece from that range in that collection. The fallback matters more
+ * than it sounds: category images are the kind of thing nobody fills in, and a
+ * grid of grey rectangles is worse than an imperfect photograph.
+ */
 collectionRouter.get('/', async (_req, res) => {
   const collections = await prisma.collection.findMany({
     where: { status: 'ACTIVE' },
     orderBy: [{ position: 'asc' }, { year: 'desc' }, { name: 'asc' }],
     select: {
-      ...publicSelect,
-      _count: { select: { products: true } },
-    },
+      id: true,
+      name: true,
+      slug: true,
+      year: true,
+      description: true,
+      coverImage: true,
+      seoTitle: true,
+      seoDescription: true,
+      publishedAt: true,
+      products: {
+        select: {
+          product: {
+            select: {
+              status: true,
+              category: { select: { id: true, name: true, slug: true, image: true } },
+              images: { orderBy: { sortOrder: 'asc' }, take: 1, select: { url: true } },
+            },
+          },
+        },
+      },
+    } satisfies Prisma.CollectionSelect,
   })
 
   return ok(res, {
-    collections: collections.map(({ _count, ...c }) => ({ ...c, productCount: _count.products })),
+    collections: collections.map(({ products, ...collection }) => {
+      const ranges = new Map<
+        string,
+        { id: string; name: string; slug: string; image: string | null; count: number }
+      >()
+
+      for (const { product } of products) {
+        // A draft piece is not in the shop, so it should not put its range on
+        // Discover or lend it a cover photo.
+        if (product.status !== 'ACTIVE') continue
+        const category = product.category
+        if (!category) continue
+
+        const existing = ranges.get(category.id)
+        if (existing) {
+          existing.count++
+          existing.image ??= product.images[0]?.url ?? null
+          continue
+        }
+
+        ranges.set(category.id, {
+          id: category.id,
+          name: category.name,
+          slug: category.slug,
+          image: category.image ?? product.images[0]?.url ?? null,
+          count: 1,
+        })
+      }
+
+      const categories = [...ranges.values()]
+
+      return {
+        ...collection,
+        categories,
+        productCount: categories.reduce((total, c) => total + c.count, 0),
+      }
+    }),
   })
 })
 

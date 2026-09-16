@@ -6,7 +6,9 @@
  *   1. the film wall, with the collection name over it
  *   2. new arrivals
  *   3. the customer films, under "Follow us"
- *   4. the newsletter
+ *
+ * The newsletter is deliberately absent: the footer carries one on every page,
+ * so a homepage section would be the second signup form in one screen.
  *
  * The film wall is carried over from whatever is already configured rather than
  * rebuilt, so running this does not un-pick the films that were uploaded. If
@@ -108,11 +110,11 @@ const sections = [
     // The five that are not already at the top of the page.
     limit: 5,
   },
-  {
-    type: 'newsletter',
-    heading: 'Stay in touch',
-    body: 'First look at new pieces, and the occasional note from the studio.',
-  },
+  /**
+   * No newsletter section. The footer already carries one on every page, and
+   * adding a second put two signup forms a few hundred pixels apart on the
+   * homepage — which reads as a mistake to a visitor, because it is one.
+   */
 ]
 
 const saved = await call('/admin/settings', {

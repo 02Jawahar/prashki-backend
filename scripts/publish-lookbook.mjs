@@ -32,6 +32,14 @@ const REVERT = args.includes('--revert')
 const OVERRIDE = args.includes('--i-know')
 
 const isLocal = /127\.0\.0\.1|localhost/.test(BASE)
+
+/**
+ * Pause between writes. Production caps writes at 60 a minute and each product
+ * costs six of them — five sizes and a publish — so an unpaced run is refused
+ * part way through with 429s. Locally the cap is 1,000 and this can be zero.
+ */
+const DELAY = Number(flag('delay', isLocal ? '0' : '1100'))
+const sleep = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve())
 if (!isLocal && !OVERRIDE) {
   console.error(`\n  Refusing to publish placeholder prices to ${BASE}.`)
   console.error('  Set real prices first, or pass --i-know if you truly mean it.\n')
@@ -117,7 +125,12 @@ for (let page = 1; ; page++) {
     process.exit(1)
   }
   const batch = listed.json?.data?.products ?? []
-  mine.push(...batch.filter((p) => p.sku?.startsWith('PK-S')))
+  /*
+   * The shoot prefixes in full, not "PK-S". A seeded demo piece called
+   * PK-SONCUT matches the short form, which quietly pulled a dress that was
+   * never part of the shoot into the publish and into the collection.
+   */
+  mine.push(...batch.filter((p) => /^PK-S[23]-/.test(p.sku ?? '')))
   if (batch.length < 100) break
 }
 
@@ -150,14 +163,23 @@ for (const product of mine) {
   // A sub-category would inherit its parent's price; none are assigned yet.
   const price = PRICES[categorySlug] ?? PRICES.pret
 
-  // Sizes first — a published product with nothing in stock reads as sold out.
-  if ((full?.variants?.length ?? 0) === 0) {
+  /*
+   * Sizes first — a published product with nothing in stock reads as sold out.
+   *
+   * The `Default` variant the import leaves behind is ignored: counting it made
+   * this think sizes already existed, so it published 63 products and created
+   * none of their 315 sizes, and reported that as a clean run.
+   */
+  const sized = (full?.variants ?? []).filter((v) => v.name !== 'Default')
+  if (sized.length === 0) {
     for (const [size, stock] of SIZES) {
       const v = await call(`/admin/products/${product.id}/variants`, {
         method: 'POST',
         body: { name: size, sku: `${product.sku}-${size}`, stock, status: 'ACTIVE' },
       })
       if (v.status < 300) variants++
+      else failures.push(`${product.sku}-${size} ${v.status} ${v.json?.error?.message ?? ''}`)
+      await sleep(DELAY)
     }
   }
 
@@ -165,6 +187,7 @@ for (const product of mine) {
     method: 'PATCH',
     body: { price, status: 'ACTIVE' },
   })
+  await sleep(DELAY)
 
   if (r.status >= 300) {
     failures.push(`${product.sku} ${r.status} ${r.json?.error?.message ?? ''}`)
