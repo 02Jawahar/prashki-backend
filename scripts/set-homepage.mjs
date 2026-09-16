@@ -97,7 +97,16 @@ if (!existingWall) {
 }
 
 const sections = [
-  existingWall,
+  {
+    ...existingWall,
+    /**
+     * The collection name again under the films, with somewhere to go. The
+     * title laid over the video carries no link — a click on a film should not
+     * navigate — so this is the line a customer can act on.
+     */
+    captionLabel: 'Shop now',
+    captionHref: '/collections/rangrez',
+  },
   /**
    * Four, matching the row it sits in. A number that does not divide the grid
    * leaves a hole in the last row, which reads as a missing product.
