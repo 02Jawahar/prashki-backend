@@ -59,6 +59,8 @@ function buildWhere(
     and.push({ collections: { some: { collection: { slug: q.collection, status: 'ACTIVE' } } } })
   }
 
+  if (q.slugs?.length) and.push({ slug: { in: q.slugs } })
+
   if (q.minPrice !== undefined) and.push({ price: { gte: q.minPrice } })
   if (q.maxPrice !== undefined) and.push({ price: { lte: q.maxPrice } })
 

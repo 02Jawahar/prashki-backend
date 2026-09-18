@@ -7,6 +7,24 @@ export const publicListQuery = z.object({
   /// A seasonal drop's slug, e.g. "rangrez". Independent of category: a piece
   /// belongs to one category and to as many collections as carried it.
   collection: z.string().trim().max(140).optional(),
+  /**
+   * An explicit line-up: "look-54,look-41,look-11". Used where an editor has
+   * chosen which pieces appear and in what order — the homepage's pinned new
+   * arrivals — rather than letting a sort decide.
+   *
+   * Capped, because this is a public endpoint and an unbounded list of slugs
+   * is an unbounded IN clause.
+   */
+  slugs: z
+    .string()
+    .trim()
+    .max(600)
+    .optional()
+    .transform((raw) => {
+      if (!raw) return undefined
+      const list = [...new Set(raw.split(',').map((s) => s.trim()).filter(Boolean))].slice(0, 12)
+      return list.length > 0 ? list : undefined
+    }),
   minPrice: z.coerce.number().int().min(0).optional(),
   maxPrice: z.coerce.number().int().min(0).optional(),
   inStock: z
