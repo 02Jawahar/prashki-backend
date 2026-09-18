@@ -53,6 +53,17 @@ function buildWhere(
     })
   }
 
+  if (q.categories?.length) {
+    // OR across the named categories, each of them still including its own
+    // children — so a list of type sub-categories behaves like one filter.
+    and.push({
+      OR: q.categories.flatMap((slug) => [
+        { category: { slug } },
+        { category: { parent: { slug } } },
+      ]),
+    })
+  }
+
   if (q.collection) {
     // Only live drops are browsable — a draft collection's slug should behave
     // as though it does not exist rather than leaking its line-up early.

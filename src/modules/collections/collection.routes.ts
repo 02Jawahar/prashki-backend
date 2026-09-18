@@ -70,7 +70,18 @@ collectionRouter.get('/', async (_req, res) => {
           product: {
             select: {
               status: true,
-              category: { select: { id: true, name: true, slug: true, image: true } },
+              category: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  image: true,
+                  // The range a piece belongs to is the top of its branch, not
+                  // the shelf it sits on. Filed under "Short Dresses", it is
+                  // still Casuals, and Discover shows ranges.
+                  parent: { select: { id: true, name: true, slug: true, image: true } },
+                },
+              },
               images: { orderBy: { sortOrder: 'asc' }, take: 1, select: { url: true } },
             },
           },
@@ -90,7 +101,10 @@ collectionRouter.get('/', async (_req, res) => {
         // A draft piece is not in the shop, so it should not put its range on
         // Discover or lend it a cover photo.
         if (product.status !== 'ACTIVE') continue
-        const category = product.category
+        // Roll up to the range. Without this, filing pieces by garment type
+        // silently turns four tiles into sixteen — the page would still work
+        // and would be showing the wrong thing.
+        const category = product.category?.parent ?? product.category
         if (!category) continue
 
         const existing = ranges.get(category.id)

@@ -4,6 +4,24 @@ import { z } from 'zod'
 export const publicListQuery = z.object({
   q: z.string().trim().max(120).optional(),
   category: z.string().trim().max(120).optional(),
+  /**
+   * Several categories at once: "casuals-long-dresses,pret-long-dresses".
+   *
+   * A garment type spans the ranges — a dress is sold as Casuals, as Pret and
+   * as Luxury Pret — so "show me the dresses" is a question `category` alone
+   * cannot ask. Matching is the same as `category`: naming a parent includes
+   * everything beneath it.
+   */
+  categories: z
+    .string()
+    .trim()
+    .max(600)
+    .optional()
+    .transform((raw) => {
+      if (!raw) return undefined
+      const list = [...new Set(raw.split(',').map((s) => s.trim()).filter(Boolean))].slice(0, 16)
+      return list.length > 0 ? list : undefined
+    }),
   /// A seasonal drop's slug, e.g. "rangrez". Independent of category: a piece
   /// belongs to one category and to as many collections as carried it.
   collection: z.string().trim().max(140).optional(),
