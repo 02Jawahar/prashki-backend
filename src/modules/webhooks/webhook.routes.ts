@@ -204,3 +204,23 @@ webhookRouter.post('/shipping', (req, res) => handleCarrierWebhook(req, res))
 webhookRouter.post('/shipping/:provider', (req, res) =>
   handleCarrierWebhook(req, res, (req.params as { provider: string }).provider),
 )
+
+/**
+ * The same handler at a path with no carrier words in it.
+ *
+ * Shiprocket refuses to register a callback URL containing "shiprocket",
+ * "kartrocket", "sr" or "kr" — and their checker appears to read that more
+ * broadly than the note does, because `/webhooks/shipping` is rejected as
+ * unreachable while answering 200 to everything else that asks. Whether the
+ * substring it objects to is "ship" or something else, the fix is the same
+ * and costs nothing: a name with none of those letters in it.
+ *
+ * Deliberately generic rather than carrier-specific. A URL is a long-lived
+ * thing to hand a third party — changing carriers later should not mean
+ * asking them to re-register a callback.
+ */
+webhookRouter.post('/parcel-updates', (req, res) => handleCarrierWebhook(req, res))
+
+webhookRouter.post('/parcel-updates/:provider', (req, res) =>
+  handleCarrierWebhook(req, res, (req.params as { provider: string }).provider),
+)
