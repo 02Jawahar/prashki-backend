@@ -581,3 +581,43 @@ export const shipmentInclude = {
   items: { include: { orderItem: true } },
   events: { orderBy: { occurredAt: 'desc' } },
 } satisfies Prisma.ShipmentInclude
+
+
+/**
+ * Fetches the carrier's label for a parcel already booked.
+ *
+ * Booking and labelling fail independently — a carrier can assign an AWB and
+ * not have the PDF ready for a minute — and a booking is never thrown away
+ * over a missing label. This is the way back for a parcel that booked but
+ * whose label did not arrive, which is otherwise unreachable: a parcel cannot
+ * be booked twice.
+ */
+export async function fetchShipmentLabel(shipmentId: string) {
+  const shipment = await prisma.shipment.findUnique({ where: { id: shipmentId } })
+  if (!shipment) throw new NotFoundError('Shipment', 'SHIPMENT_NOT_FOUND')
+
+  if (!shipment.providerShipmentId) {
+    throw new ConflictError(
+      'This parcel was not booked with a carrier, so there is no label to fetch',
+      'SHIPMENT_NOT_BOOKED',
+    )
+  }
+
+  const provider = getShippingProvider(shipment.provider)
+  if (!provider.fetchLabel) {
+    throw new ConflictError(
+      `${provider.name} does not provide labels`,
+      'LABEL_NOT_SUPPORTED',
+    )
+  }
+
+  const labelUrl = await provider.fetchLabel(shipment.providerShipmentId)
+  if (!labelUrl) {
+    throw new ConflictError(
+      'The carrier has not produced a label yet. Try again in a minute.',
+      'LABEL_NOT_READY',
+    )
+  }
+
+  return prisma.shipment.update({ where: { id: shipmentId }, data: { labelUrl } })
+}

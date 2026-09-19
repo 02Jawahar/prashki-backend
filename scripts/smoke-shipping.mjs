@@ -413,13 +413,23 @@ let trackingNumber = `SMOKE${Date.now()}`
 }
 
 {
-  // The manual adapter refuses rather than inventing an AWB — a fake reference
-  // would let the workflow believe a parcel was booked when it was not.
+  /*
+   * An adapter that cannot book refuses rather than inventing an AWB — a fake
+   * reference would let the workflow believe a parcel was booked when it was
+   * not. Which adapter is configured is a deployment's choice, so what is
+   * asserted is that the answer agrees with itself: a build wired to a real
+   * carrier books, one wired to manual fulfilment refuses.
+   */
+  const before = await call(`/admin/shipments?orderId=${orderId}`, { jar: admin })
+  const canBook = (before.json?.data?.shipments ?? []).find((s) => s.id === shipmentId)?.canBook
+
   const booked = await call(`/admin/shipments/${shipmentId}/book`, { method: 'POST', jar: admin })
   check(
-    'the manual adapter refuses to fabricate a carrier booking',
-    booked.status === 409,
-    `status ${booked.status} ${booked.json?.error?.code ?? ''}`,
+    canBook
+      ? 'a carrier-backed build books the parcel'
+      : 'an adapter that cannot book refuses to fabricate one',
+    canBook ? booked.status < 400 : booked.status === 409,
+    `canBook=${canBook} status ${booked.status} ${booked.json?.error?.code ?? ''}`,
   )
 
   /*

@@ -967,6 +967,19 @@ model ShippingMethod {
   name        String
   description String?
 
+  /**
+   * How the carrier is chosen when the provider quotes live rates.
+   *
+   * Null keeps the flat rate below — the method is priced here and booked
+   * by hand. Set, the price shown at checkout is what the carrier quotes for
+   * that parcel, and the same rule picks the courier at booking.
+   *
+   * The flat rate stays either way. It is what the customer is charged when
+   * the carrier cannot be reached, because a checkout that fails because an
+   * aggregator is down is worse than one that occasionally under-charges.
+   */
+  carrierRule String?
+
   /// Flat rate in paise. Free shipping is simply 0.
   rate           Int  @default(0)
   /// Cart subtotal at or above which this method costs nothing. Null = never.

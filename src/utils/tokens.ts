@@ -14,6 +14,14 @@ import { env, isProduction } from '../config/env.js'
  * which takes XSS-driven token theft off the table.
  */
 export const ACCESS_COOKIE = 'at'
+/**
+ * A readable marker saying a session exists. Carries nothing secret — the
+ * tokens stay httpOnly — and exists so the browser can tell "my token has
+ * expired, refresh it" from "I have never signed in", which it otherwise
+ * cannot, and which costs every signed-out visitor a pointless refresh that
+ * answers 403.
+ */
+export const SESSION_HINT_COOKIE = 'has_session'
 export const REFRESH_COOKIE = 'rt'
 
 export interface AccessTokenPayload {
@@ -119,9 +127,16 @@ export function setAuthCookies(
     ...baseCookie,
     maxAge: refreshTtlDays(role) * 24 * 60 * 60 * 1000,
   })
+  res.cookie(SESSION_HINT_COOKIE, '1', {
+    ...baseCookie,
+    // Readable on purpose. It says only that a session exists.
+    httpOnly: false,
+    maxAge: refreshTtlDays(role) * 24 * 60 * 60 * 1000,
+  })
 }
 
 export function clearAuthCookies(res: Response) {
   res.clearCookie(ACCESS_COOKIE, { ...baseCookie })
   res.clearCookie(REFRESH_COOKIE, { ...baseCookie })
+  res.clearCookie(SESSION_HINT_COOKIE, { ...baseCookie, httpOnly: false })
 }

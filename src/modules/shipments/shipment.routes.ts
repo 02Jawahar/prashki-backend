@@ -7,7 +7,7 @@ import { writeLimiter } from '../../middleware/rate-limit.js'
 import { created, ok } from '../../utils/response.js'
 import { NotFoundError } from '../../utils/errors.js'
 import { recordAudit } from '../../utils/audit.js'
-import {
+import { fetchShipmentLabel,
   announceShipment,
   bookWithProvider,
   cancelWithCarrier,
@@ -235,6 +235,21 @@ adminShipmentRouter.post(
 
     const shipment = await bookWithProvider(id)
     recordAudit({ action: 'SHIPMENT_BOOKED', entityType: 'Shipment', entityId: id, req })
+
+    return ok(res, { shipment })
+  },
+)
+
+/** Asks the carrier for the label of a parcel already booked. */
+adminShipmentRouter.post(
+  '/:id/label',
+  writeLimiter,
+  requirePermission('shipment.manage'),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+
+    const shipment = await fetchShipmentLabel(id)
+    recordAudit({ action: 'SHIPMENT_LABEL_FETCHED', entityType: 'Shipment', entityId: id, req })
 
     return ok(res, { shipment })
   },

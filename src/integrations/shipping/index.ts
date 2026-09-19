@@ -1,6 +1,7 @@
 import { prisma } from '../../config/db.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
+import { ShiprocketProvider } from './shiprocket.provider.js'
 import { ManualShippingProvider } from './manual.provider.js'
 import type { ShippingProvider } from './shipping.types.js'
 
@@ -26,6 +27,7 @@ type AdapterFactory = () => ShippingProvider
 
 const ADAPTERS: Record<string, AdapterFactory> = {
   manual: () => new ManualShippingProvider(),
+  shiprocket: () => new ShiprocketProvider(),
 }
 
 /** Adapters hold state — HTTP agents, cached auth tokens — so one instance each. */

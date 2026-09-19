@@ -95,6 +95,17 @@ export interface CarrierEvent {
   payload: unknown
 }
 
+/** A carrier's own quote for one parcel, in the store's own units. */
+export interface CarrierRate {
+  /** Which rule produced it, and how the same courier is found again at booking. */
+  rule: 'cheapest' | 'fastest'
+  courierId: string
+  courierName: string
+  /** integer paise — what the carrier charges, converted from their decimal. */
+  amount: number
+  estimatedDays: number | null
+}
+
 export interface ShippingProvider {
   readonly name: string
   /** True when the adapter has everything it needs to actually book a parcel. */
@@ -117,6 +128,30 @@ export interface ShippingProvider {
    * unmapped status, a body that is not JSON — because those need a different
    * answer from whoever is looking at them.
    */
+  /**
+   * Live prices for one parcel, when the carrier quotes them.
+   *
+   * Optional: a provider that cannot quote — manual booking — simply does not
+   * implement it, and the method's own flat rate stands. Returning an empty
+   * array means "nobody serves this"; throwing means "could not ask", and the
+   * two must not be confused, because the first should stop a sale and the
+   * second must not.
+   */
+  /**
+   * The printable label for a parcel already booked.
+   *
+   * Separate from booking because the two fail independently: a carrier can
+   * assign an AWB and not have the label ready for a minute, and a booking
+   * must not be thrown away over a PDF. Without this, a parcel that booked
+   * but whose label failed has no way back — you cannot book it twice.
+   */
+  fetchLabel?(providerShipmentId: string): Promise<string | null>
+
+  quoteRates?(
+    postalCode: string,
+    options: { weightGrams: number; cod?: boolean; country?: string },
+  ): Promise<CarrierRate[]>
+
   parseWebhook(rawBody: Buffer, headers: WebhookHeaders): CarrierEvent | null
   /**
    * Turns an already-verified body into an event, without checking a signature.

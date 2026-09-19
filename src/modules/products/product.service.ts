@@ -10,7 +10,20 @@ import {
 import type { AdminListQuery, PublicListQuery } from './product.schemas.js'
 
 const SORTS: Record<string, Prisma.ProductOrderByWithRelationInput | Prisma.ProductOrderByWithRelationInput[]> = {
-  featured: [{ featured: 'desc' }, { publishedAt: 'desc' }],
+  /**
+   * The default. Featured pieces first, then the shop's own order: Casuals,
+   * Pret, Luxury Pret, Bridal — the same sequence as the Women's menu, so
+   * "View all" reads as the shop laid out rather than as an arbitrary dump.
+   *
+   * A piece filed under a garment type sorts by that type's parent, because
+   * the ranking that matters here is the range, not the shelf within it.
+   */
+  featured: [
+    { featured: 'desc' },
+    { category: { parent: { sortOrder: 'asc' } } },
+    { category: { sortOrder: 'asc' } },
+    { publishedAt: 'desc' },
+  ],
   newest: { publishedAt: 'desc' },
   oldest: { publishedAt: 'asc' },
   'price-asc': { price: 'asc' },

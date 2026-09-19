@@ -7,7 +7,7 @@ try {
   const here = path.dirname(fileURLToPath(import.meta.url))
   process.loadEnvFile(path.resolve(here, '..', '..', '.env'))
 } catch {
-  // no .env file — fall back to the real environment
+  // no .env file â€” fall back to the real environment
 }
 
 const schema = z.object({
@@ -26,7 +26,7 @@ const schema = z.object({
    * "Admin sessions use shorter expiry ... than public sessions").
    *
    * A stolen customer session can place an order. A stolen admin session can
-   * empty the catalogue, read every customer's address and issue refunds — so
+   * empty the catalogue, read every customer's address and issue refunds â€” so
    * it gets a fraction of the lifetime.
    */
   ADMIN_ACCESS_TOKEN_TTL: z.string().default('10m'),
@@ -67,7 +67,7 @@ const schema = z.object({
   EMAIL_FROM: z.string().default('orders@example.com'),
 
   /**
-   * SMTP, which every mail service speaks — Brevo, Resend, Mailtrap, Gmail,
+   * SMTP, which every mail service speaks â€” Brevo, Resend, Mailtrap, Gmail,
    * Amazon SES. One adapter rather than one per vendor, so changing provider
    * is four environment variables and no deploy of new code.
    */
@@ -75,8 +75,8 @@ const schema = z.object({
   SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
   SMTP_USER: z.string().trim().optional(),
   /**
-   * Google shows an app password as four groups of four — "msty biow ihan
-   * aemh" — because it is easier to read that way. The password is the sixteen
+   * Google shows an app password as four groups of four â€” "msty biow ihan
+   * aemh" â€” because it is easier to read that way. The password is the sixteen
    * characters; the spaces are presentation. Pasted verbatim it authenticates
    * as a nineteen-character string and Gmail rejects it, which reads as a
    * wrong password when the credential is perfectly good.
@@ -92,7 +92,7 @@ const schema = z.object({
     ),
   /**
    * Implicit TLS from the first byte (port 465). Port 587 uses STARTTLS, which
-   * is negotiated on a plain connection, so this stays false there — setting
+   * is negotiated on a plain connection, so this stays false there â€” setting
    * it wrong is the usual reason a working password appears to be rejected.
    */
   SMTP_SECURE: z
@@ -104,10 +104,39 @@ const schema = z.object({
   WHATSAPP_PROVIDER: z.enum(['noop', 'meta', 'twilio']).default('noop'),
 
   /**
-   * Carrier integration. `manual` means parcels are booked by hand — the
+   * Carrier integration. `manual` means parcels are booked by hand â€” the
    * inbound status webhook still works, verified with the shared secret below.
    */
   SHIPPING_PROVIDER: z.string().default('manual'),
+
+  /**
+   * Shiprocket (M21).
+   *
+   * The base URL is configurable because their sandbox and live hosts differ,
+   * and pointing at the wrong one fails authentication in a way that reads
+   * exactly like bad credentials.
+   */
+  SHIPROCKET_BASE_URL: z.string().url().default('https://apiv2.shiprocket.in/v1/external'),
+  /**
+   * Serviceability answers on its own host, in sandbox and in production
+   * alike. Left empty it falls back to the main base URL, which is what a
+   * carrier without the split would want.
+   */
+  SHIPROCKET_SERVICEABILITY_BASE_URL: z.string().url().optional(),
+  SHIPROCKET_EMAIL: z.string().optional(),
+  SHIPROCKET_PASSWORD: z.string().optional(),
+  /** The pickup address's name in their panel, exactly as spelled there. */
+  SHIPROCKET_PICKUP_LOCATION: z.string().optional(),
+  /** Where parcels leave from, for rate and serviceability queries. */
+  SHIPROCKET_PICKUP_PINCODE: z.string().optional(),
+  /** Which courier to book when several serve the route. */
+  SHIPROCKET_COURIER_RULE: z.enum(['cheapest', 'fastest']).default('cheapest'),
+  /** A specific courier, when the studio has an arrangement with one. */
+  SHIPROCKET_COURIER_ID: z.string().optional(),
+  /** Their orders need an email; the customer's is not sent to them by default. */
+  SHIPROCKET_ORDER_EMAIL: z.string().optional(),
+  /** Shared secret echoed back in x-api-key on their tracking callbacks. */
+  SHIPROCKET_WEBHOOK_TOKEN: z.string().optional(),
   SHIPPING_WEBHOOK_SECRET: z.string().optional(),
   /// Fallback parcel weight per unit when a variant has none, in grams.
   SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS: z.coerce.number().int().min(0).default(500),
@@ -128,7 +157,7 @@ const schema = z.object({
  * Rules that only apply in production.
  *
  * The base schema has to stay permissive enough for local development, where
- * `change-me` is a perfectly good password. In production it is a way in — so
+ * `change-me` is a perfectly good password. In production it is a way in â€” so
  * the placeholders shipped in `.env.example` are rejected at boot rather than
  * quietly deployed.
  *
@@ -172,7 +201,7 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
   // Cookies are only sent over HTTPS in production; an http:// frontend means
   // the browser will drop the session and the login loop looks like a bug.
   if (env.FRONTEND_URL.startsWith('http://')) {
-    issues.push('FRONTEND_URL must be https:// in production — secure cookies are not sent over http')
+    issues.push('FRONTEND_URL must be https:// in production â€” secure cookies are not sent over http')
   }
 
   /**
@@ -198,7 +227,7 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
     // Most services reject a From address on a domain you have not verified,
     // and the placeholder is the one nobody remembers to change.
     if (env.EMAIL_FROM.includes('example.com')) {
-      issues.push('EMAIL_FROM is still a placeholder — set it to an address on a domain you control')
+      issues.push('EMAIL_FROM is still a placeholder â€” set it to an address on a domain you control')
     }
   }
 
@@ -226,13 +255,13 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
 
   /**
    * Image URLs are written into the database at upload time and never
-   * recomputed, so a placeholder here is not a cosmetic problem — every
+   * recomputed, so a placeholder here is not a cosmetic problem â€” every
    * product photo gets a permanently broken address on a domain nobody owns,
    * and fixing it later means rewriting rows.
    */
   if (env.STORAGE_PUBLIC_URL.includes('example.com')) {
     issues.push(
-      'STORAGE_PUBLIC_URL is still a placeholder — image URLs are stored permanently, so fix it before uploading anything',
+      'STORAGE_PUBLIC_URL is still a placeholder â€” image URLs are stored permanently, so fix it before uploading anything',
     )
   }
 
@@ -242,7 +271,7 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
     }
     if (!env.RAZORPAY_WEBHOOK_SECRET) {
       issues.push(
-        'RAZORPAY_WEBHOOK_SECRET is required — without it a payment webhook cannot be verified',
+        'RAZORPAY_WEBHOOK_SECRET is required â€” without it a payment webhook cannot be verified',
       )
     }
   }
@@ -265,7 +294,7 @@ const unsafe = productionIssues(parsed.data)
 
 if (unsafe.length > 0) {
   console.error('\nRefusing to start in production:\n')
-  for (const issue of unsafe) console.error(`  • ${issue}`)
+  for (const issue of unsafe) console.error(`  â€¢ ${issue}`)
   console.error('\nFix these in the environment and redeploy.\n')
   process.exit(1)
 }

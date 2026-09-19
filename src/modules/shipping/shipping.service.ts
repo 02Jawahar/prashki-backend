@@ -1,5 +1,7 @@
 import type { Prisma, ShippingMethod, ShippingRate } from '@prisma/client'
 import { prisma } from '../../config/db.js'
+import { logger } from '../../config/logger.js'
+import { getShippingProvider } from '../../integrations/shipping/index.js'
 import { env } from '../../config/env.js'
 import { NotFoundError, ValidationError } from '../../utils/errors.js'
 
@@ -207,6 +209,90 @@ export interface QuoteResult {
 }
 
 /**
+ * Replaces a method's flat rate with what the carrier actually charges.
+ *
+ * Only methods that ask for it — a `carrierRule` of cheapest or fastest — and
+ * only when the active provider can quote. Everything else keeps the rate an
+ * operator set, which is what a manually booked parcel should do.
+ *
+ * A carrier that cannot be reached leaves every rate exactly as it was. That
+ * is the point of keeping the flat rate: a checkout that fails because an
+ * aggregator is down is worse than one that occasionally under-charges by a
+ * few rupees, and the difference is recoverable — a lost sale is not.
+ *
+ * Free-shipping rules are re-applied afterwards, so a live rate is still free
+ * over the threshold rather than quietly charging for a delivery the shop
+ * promised.
+ */
+type CarrierOutcome =
+  /** Rates applied, or nothing to apply them to. */
+  | 'priced'
+  /** The carrier answered and no courier serves that address. */
+  | 'unserved'
+  /** The carrier could not be asked. Flat rates stand.  */
+  | 'unavailable'
+
+async function applyCarrierRates(
+  rows: ZoneWithMethods['methods'],
+  quotes: ShippingQuote[],
+  input: QuoteInput,
+): Promise<CarrierOutcome> {
+  const wanted = rows.filter((m) => m.carrierRule)
+  if (wanted.length === 0) return 'priced'
+
+  let provider
+  try {
+    provider = getShippingProvider()
+  } catch {
+    return 'unavailable'
+  }
+  if (!provider.quoteRates || !provider.isConfigured()) return 'unavailable'
+  if (!input.postalCode) return 'unavailable'
+
+  let rates
+  try {
+    rates = await provider.quoteRates(input.postalCode, {
+      weightGrams: input.weightGrams,
+      country: input.country,
+    })
+  } catch (err) {
+    logger.warn({ err, postalCode: input.postalCode }, 'Carrier rates unavailable; flat rates stand')
+    return 'unavailable'
+  }
+
+  /**
+   * An empty answer is not an outage. The carrier was reached and said no
+   * courier goes there, which is the only check the shop has that an address
+   * is real — a PIN code nobody delivers to is either a typo or invented, and
+   * charging a flat rate for it books a parcel that can never be collected.
+   */
+  if (rates.length === 0) return 'unserved'
+
+  for (const row of wanted) {
+    const quote = quotes.find((q) => q.id === row.id)
+    if (!quote) continue
+
+    const rate = rates.find((r) => r.rule === row.carrierRule)
+
+    /**
+     * No rate for this rule means the same courier won both, and another
+     * method already has it. The flat rate is left in place rather than
+     * copied across, because two options at one price under two names is a
+     * choice that is not a choice.
+     */
+    if (!rate) continue
+
+    quote.rate = rate.amount
+    quote.cost = quote.isFree ? 0 : rate.amount
+    quote.minDays = rate.estimatedDays ?? quote.minDays
+    quote.maxDays = rate.estimatedDays ?? quote.maxDays
+    quote.rateBand = `${rate.courierName} (${rate.rule})`
+  }
+
+  return 'priced'
+}
+
+/**
  * Every method the customer may pick for this destination and basket.
  *
  * An empty list is never silently a free delivery — the caller must treat it
@@ -242,6 +328,19 @@ export async function quoteShipping(input: QuoteInput): Promise<QuoteResult> {
   const methods = zone.methods
     .filter((m) => methodApplies(m, input.subtotal, input.weightGrams))
     .map((m) => priceMethod(m, input.subtotal, input.weightGrams, input.freeShippingCoupon ?? false))
+
+  const carrier = await applyCarrierRates(zone.methods, methods, input)
+
+  if (carrier === 'unserved') {
+    return {
+      zone: { id: zone.id, name: zone.name },
+      methods: [],
+      serviceable: false,
+      reason:
+        'No courier delivers to that PIN code. Please check it, or try a different address.',
+      weightGrams: input.weightGrams,
+    }
+  }
 
   return {
     zone: { id: zone.id, name: zone.name },
@@ -289,5 +388,32 @@ export async function priceChosenMethod(
     throw new ValidationError('That delivery option is not available for this order')
   }
 
-  return priceMethod(method, input.subtotal, input.weightGrams, input.freeShippingCoupon ?? false)
+  const quote = priceMethod(
+    method,
+    input.subtotal,
+    input.weightGrams,
+    input.freeShippingCoupon ?? false,
+  )
+
+  /**
+   * Ask the carrier again, at the moment the order is made.
+   *
+   * The checkout quote already refused a PIN code nobody serves, but that
+   * answer came from a browser and this is the call that takes money. A
+   * request that skipped the quote — or an address edited between quoting and
+   * paying — would otherwise be priced at the flat rate and charged for a
+   * parcel no courier will collect.
+   *
+   * The same rule as the quote: a carrier that cannot be reached leaves the
+   * flat rate standing, because an outage must not stop a sale.
+   */
+  const outcome = await applyCarrierRates([method], [quote], input)
+  if (outcome === 'unserved') {
+    throw new ValidationError(
+      'No courier delivers to that PIN code. Please check the address.',
+      { code: 'ADDRESS_NOT_SERVICEABLE' },
+    )
+  }
+
+  return quote
 }
