@@ -10,6 +10,7 @@ import {
   createVariantSchema,
   publishSchema,
   reorderImagesSchema,
+  setComponentsSchema,
   updateProductSchema,
   updateVariantSchema,
 } from './product.schemas.js'
@@ -24,6 +25,7 @@ import {
   listHandler,
   publishHandler,
   reorderImagesHandler,
+  setComponentsHandler,
   updateHandler,
   updateVariantHandler,
   uploadImagesHandler,
@@ -96,6 +98,23 @@ adminProductRouter.delete(
   writeLimiter,
   requirePermission('product.update'),
   deleteVariantHandler,
+)
+
+// -------------------------------------------------------------------- sets
+
+/**
+ * The pieces a set is made of, replaced in one go.
+ *
+ * Sent whole rather than added one at a time, because the order matters and a
+ * half-applied set is not a state worth being able to reach. An empty list
+ * turns the set back into an ordinary product.
+ */
+adminProductRouter.put(
+  '/:id/components',
+  writeLimiter,
+  requirePermission('product.update'),
+  validate({ body: setComponentsSchema }),
+  setComponentsHandler,
 )
 
 // ------------------------------------------------------------------ images

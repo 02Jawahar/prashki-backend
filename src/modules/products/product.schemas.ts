@@ -200,6 +200,11 @@ export const reorderImagesSchema = z.object({
   imageIds: z.array(z.string().min(1)).min(1),
 })
 
+/** The pieces a set is assembled from, in the order they should be shown. */
+export const setComponentsSchema = z.object({
+  componentProductIds: z.array(z.string().trim().min(1)).max(8),
+})
+
 export const slugParam = z.object({ slug: z.string().trim().min(1) })
 export const idParam = z.object({ id: z.string().trim().min(1) })
 

@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import { prisma } from '../../config/db.js'
+import { assertUsableComponents, writeComponents } from './set.service.js'
 import { created, noContent, ok, pageMeta } from '../../utils/response.js'
 import { ConflictError, NotFoundError, ValidationError } from '../../utils/errors.js'
 import { changedFields, recordAudit } from '../../utils/audit.js'
@@ -451,4 +452,38 @@ function keyFromUrl(url: string): string {
   const marker = '/uploads/'
   const idx = url.indexOf(marker)
   return idx === -1 ? url : url.slice(idx + marker.length)
+}
+
+/**
+ * Replaces the pieces a set is made of.
+ *
+ * Everything is checked before anything is written — at least two pieces, no
+ * duplicates, no piece that is itself a set, nothing that has been deleted.
+ * A set half-assembled is a product that prices wrongly, and pricing wrongly
+ * is the one failure here that reaches a customer's card.
+ */
+export async function setComponentsHandler(req: Request, res: Response) {
+  const { id } = req.params as { id: string }
+  const { componentProductIds } = req.validated!.body as { componentProductIds: string[] }
+
+  const product = await prisma.product.findUnique({ where: { id }, select: { id: true } })
+  if (!product) throw new NotFoundError('Product', 'PRODUCT_NOT_FOUND')
+
+  if (componentProductIds.length === 0) {
+    // Emptying the list is how a set becomes an ordinary product again.
+    await prisma.productComponent.deleteMany({ where: { setProductId: id } })
+  } else {
+    await assertUsableComponents(id, componentProductIds)
+    await prisma.$transaction((tx) => writeComponents(id, componentProductIds, tx))
+  }
+
+  recordAudit({
+    action: 'PRODUCT_SET_UPDATED',
+    entityType: 'Product',
+    entityId: id,
+    metadata: { pieces: componentProductIds.length },
+    req,
+  })
+
+  return ok(res, { product: await getAdminProductById(id) })
 }

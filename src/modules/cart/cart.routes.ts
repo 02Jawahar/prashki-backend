@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../../config/db.js'
@@ -6,6 +7,7 @@ import { ok, noContent } from '../../utils/response.js'
 import { ConflictError, NotFoundError } from '../../utils/errors.js'
 import { writeLimiter } from '../../middleware/rate-limit.js'
 import { evaluateCoupon, normalizeCode } from '../coupons/coupon.service.js'
+import { resolveSetSelection } from '../products/set.service.js'
 import { resolveCart } from './cart.service.js'
 import { cartInclude, loadCart, serializeCart } from './cart.serializer.js'
 
@@ -68,6 +70,78 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
   }
 
   return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })
+})
+
+/**
+ * Buying a set: one request, one line in the bag per piece.
+ *
+ * The sizes come from the customer, so every one of them is checked against
+ * the set before anything is written — a size belonging to a different piece
+ * would otherwise let someone pay a blouse's share for a lehenga.
+ *
+ * Stock is checked per piece here and again inside the order transaction. A
+ * set whose lehenga has one left and whose blouse has none is refused whole:
+ * half a set in the bag is worse than nothing, because the customer discovers
+ * it at checkout.
+ */
+const addSetSchema = z.object({
+  setProductId: z.string().trim().min(1),
+  pieces: z
+    .array(z.object({ productId: z.string().trim().min(1), variantId: z.string().trim().min(1) }))
+    .min(2)
+    .max(8),
+})
+
+cartRouter.post('/sets', validate({ body: addSetSchema }), async (req, res) => {
+  const cart = await resolveCart(req, res)
+  const { setProductId, pieces } = req.validated!.body as z.infer<typeof addSetSchema>
+
+  const { setName, lines } = await resolveSetSelection(setProductId, pieces)
+
+  const stock = await prisma.inventory.findMany({
+    where: { variantId: { in: lines.map((l) => l.variantId) } },
+    select: { variantId: true, availableStock: true },
+  })
+  const available = new Map(stock.map((s) => [s.variantId, s.availableStock]))
+
+  const short = lines.filter((line) => (available.get(line.variantId) ?? 0) < 1)
+  if (short.length > 0) {
+    throw new ConflictError(
+      `${setName} is not available in the sizes you chose`,
+      'INSUFFICIENT_STOCK',
+    )
+  }
+
+  // One id ties the lines together for the whole of their life in the bag.
+  const setGroupId = crypto.randomUUID()
+
+  await prisma.cartItem.createMany({
+    data: lines.map((line) => ({
+      cartId: cart.id,
+      variantId: line.variantId,
+      quantity: 1,
+      setGroupId,
+      setProductId,
+      setUnitPrice: line.unitPrice,
+    })),
+  })
+
+  return ok(res, {
+    cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }),
+  })
+})
+
+/** Removing a set removes all of it. Half a set is not something anyone ordered. */
+cartRouter.delete('/sets/:setGroupId', async (req, res) => {
+  const cart = await resolveCart(req, res)
+  const { setGroupId } = req.params as { setGroupId: string }
+
+  const removed = await prisma.cartItem.deleteMany({ where: { cartId: cart.id, setGroupId } })
+  if (removed.count === 0) throw new NotFoundError('Set', 'CART_SET_NOT_FOUND')
+
+  return ok(res, {
+    cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }),
+  })
 })
 
 cartRouter.patch('/items/:itemId', validate({ body: updateItemSchema }), async (req, res) => {

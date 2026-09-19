@@ -70,6 +70,8 @@ export async function createOrder(input: CreateOrderInput) {
         include: {
           items: {
             include: {
+              /** The set a line came from, so the order keeps its name. */
+              set: { select: { name: true } },
               variant: {
                 include: {
                   inventory: true,
@@ -109,9 +111,16 @@ export async function createOrder(input: CreateOrderInput) {
           )
         }
 
-        const unitPrice = variant.price ?? product.price
+        /**
+         * A line that came from a set is charged its share of the set price.
+         * Same rule as the bag — if these two ever disagree, the customer is
+         * shown one figure and billed another.
+         */
+        const unitPrice = item.setUnitPrice ?? variant.price ?? product.price
         return {
           cartItemId: item.id,
+          setGroupId: item.setGroupId,
+          setNameSnapshot: item.set?.name ?? null,
           categoryId: product.categoryId,
           isDiscounted: product.compareAtPrice !== null && product.compareAtPrice > unitPrice,
           variantId: variant.id,

@@ -66,6 +66,36 @@ export const productDetailInclude = {
     orderBy: { position: 'asc' },
     include: { inventory: true },
   },
+  /**
+   * The pieces a set is made of, each with its own sizes — the page needs a
+   * size picker per piece, not one for the whole set.
+   */
+  components: {
+    orderBy: { position: 'asc' },
+    select: {
+      position: true,
+      component: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          price: true,
+          status: true,
+          images: { orderBy: { sortOrder: 'asc' }, take: 1, select: { url: true } },
+          variants: {
+            where: { status: 'ACTIVE' as const },
+            orderBy: { position: 'asc' },
+            select: {
+              id: true,
+              name: true,
+              sku: true,
+              inventory: { select: { availableStock: true } },
+            },
+          },
+        },
+      },
+    },
+  },
 } satisfies Prisma.ProductInclude
 
 type ProductDetailRow = Prisma.ProductGetPayload<{ include: typeof productDetailInclude }>
@@ -118,6 +148,34 @@ export function toProductDetail(p: ProductDetailRow, { includeInactive = false }
       sortOrder: i.sortOrder,
     })),
     variants,
+
+    /**
+     * Null for a single garment. When present, the page asks for a size per
+     * piece and the customer pays the set's price, not the sum below — the
+     * pieces carry their own prices only so the saving can be shown.
+     */
+    set:
+      p.components.length === 0
+        ? null
+        : {
+            pieces: p.components.map(({ component }) => ({
+              productId: component.id,
+              name: component.name,
+              slug: component.slug,
+              price: component.price,
+              image: component.images[0]?.url ?? null,
+              available: component.status === 'ACTIVE',
+              sizes: component.variants.map((v) => ({
+                id: v.id,
+                name: v.name,
+                sku: v.sku,
+                stock: v.inventory?.availableStock ?? 0,
+                inStock: (v.inventory?.availableStock ?? 0) > 0,
+              })),
+            })),
+            /** What the pieces come to separately, for showing what is saved. */
+            piecesTotal: p.components.reduce((sum, c) => sum + c.component.price, 0),
+          },
     inStock: variants.some((v) => v.inStock),
     totalStock: variants.reduce((sum, v) => sum + v.stock, 0),
     createdAt: p.createdAt,
