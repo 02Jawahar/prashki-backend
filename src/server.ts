@@ -5,6 +5,7 @@ import { prisma, setDatabaseUrl } from './config/db.js'
 import { ensureDatabase, waitForDatabase } from './config/embedded-db.js'
 import { registerEventHandlers } from './events/handlers.js'
 import { assertConsoleEmailIsSafe, verifyEmailProvider } from './integrations/notifications/index.js'
+import { assertPaymentConfigured } from './integrations/payment/index.js'
 import { assertShippingConfigured } from './integrations/shipping/index.js'
 import { startScheduler, stopScheduler } from './jobs/scheduler.js'
 
@@ -28,6 +29,15 @@ try {
 // at boot rather than when the first parcel is packed.
 try {
   await assertShippingConfigured()
+} catch (err) {
+  logger.fatal(err instanceof Error ? err.message : String(err))
+  process.exit(1)
+}
+
+// The same reasoning, for the half that takes the money: a store that cannot
+// charge should not be serving a checkout button.
+try {
+  assertPaymentConfigured()
 } catch (err) {
   logger.fatal(err instanceof Error ? err.message : String(err))
   process.exit(1)

@@ -118,9 +118,10 @@ const schema = z.object({
    */
   SHIPROCKET_BASE_URL: z.string().url().default('https://apiv2.shiprocket.in/v1/external'),
   /**
-   * Serviceability answers on its own host, in sandbox and in production
-   * alike. Left empty it falls back to the main base URL, which is what a
-   * carrier without the split would want.
+   * Sandbox answers serviceability on its own host; live does not. Verified
+   * against the live API: `apiv2.shiprocket.in/.../courier/serviceability/`
+   * returns rates directly, so this stays empty in production and falls back
+   * to the main base URL.
    */
   SHIPROCKET_SERVICEABILITY_BASE_URL: z.string().url().optional(),
   SHIPROCKET_EMAIL: z.string().optional(),
@@ -265,7 +266,28 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
     )
   }
 
+  /**
+   * A store that cannot take money is not a store, so the selected provider is
+   * checked here rather than at the first checkout.
+   */
+  if (env.PAYMENT_PROVIDER !== 'razorpay') {
+    issues.push(
+      `PAYMENT_PROVIDER=${env.PAYMENT_PROVIDER} cannot take real payments — set PAYMENT_PROVIDER=razorpay`,
+    )
+  }
+
   if (env.PAYMENT_PROVIDER === 'razorpay') {
+    /**
+     * A test key is the dangerous misconfiguration, because nothing about it
+     * looks wrong. Every other guard passes, checkout completes, the order is
+     * marked PAID and the confirmation goes out — and no money has moved.
+     * Razorpay names its keys, so this is knowable at boot.
+     */
+    if (env.RAZORPAY_KEY_ID?.startsWith('rzp_test_')) {
+      issues.push(
+        'RAZORPAY_KEY_ID is a test key (rzp_test_) — orders would complete without taking any money. Use the live key.',
+      )
+    }
     if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
       issues.push('PAYMENT_PROVIDER=razorpay requires RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET')
     }

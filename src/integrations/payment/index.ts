@@ -35,3 +35,18 @@ export function getPaymentProvider(): PaymentProvider {
   logger.info('Payment provider: mock (development only)')
   return provider
 }
+
+/**
+ * Resolves the payment provider at boot, so a store that cannot take money
+ * fails the deploy rather than the first customer.
+ *
+ * `getPaymentProvider` already refuses the mock provider in production and
+ * throws on missing Razorpay credentials — but it is called lazily, from the
+ * checkout request. Without this the container starts, passes its health
+ * check, serves the whole catalogue, and only breaks at the one moment it
+ * cannot afford to: someone with a full bag pressing Pay.
+ */
+export function assertPaymentConfigured(): void {
+  const active = getPaymentProvider()
+  logger.info({ provider: active.name }, 'Payment provider ready')
+}
