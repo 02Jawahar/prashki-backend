@@ -83,17 +83,42 @@ export async function resolveZone(destination: Destination): Promise<ZoneWithMet
  * counting as zero — a missing weight must not make a heavy parcel look light
  * enough for the cheapest band.
  */
+/**
+ * What one line weighs, in grams.
+ *
+ * The chosen part wins over the size. A product sold in parts has one size
+ * variant behind every option - a top and the full set are both "M" - so a
+ * weight that lived only on the variant would quote the same parcel for a
+ * blouse and for a blouse, skirt and dupatta together.
+ *
+ * Falling through to the store-wide default rather than refusing: a garment
+ * nobody has weighed still has to be sellable, and the carrier reweighs at the
+ * hub anyway. The default being wrong costs money quietly, which is why it is
+ * worth setting these.
+ */
+export function lineWeightGrams(item: {
+  quantity: number
+  variant: { weightGrams: number | null }
+  setOption?: { weightGrams: number | null } | null
+}): number {
+  const each =
+    item.setOption?.weightGrams ??
+    item.variant.weightGrams ??
+    env.SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS
+
+  return each * item.quantity
+}
+
 export async function cartWeightGrams(cartId: string): Promise<number> {
   const items = await prisma.cartItem.findMany({
     where: { cartId },
-    include: { variant: { select: { weightGrams: true } } },
+    include: {
+      variant: { select: { weightGrams: true } },
+      setOption: { select: { weightGrams: true } },
+    },
   })
 
-  return items.reduce(
-    (total, item) =>
-      total + (item.variant.weightGrams ?? env.SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS) * item.quantity,
-    0,
-  )
+  return items.reduce((total, item) => total + lineWeightGrams(item), 0)
 }
 
 /** Same calculation for an order that already exists, used when shipping it. */

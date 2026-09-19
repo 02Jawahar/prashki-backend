@@ -136,6 +136,10 @@ export function toProductDetail(p: ProductDetailRow, { includeInactive = false }
       sku: v.sku,
       /// null price means "inherit the product price"
       price: v.price ?? p.price,
+      /// Grams, or null for a garment nobody has weighed. Not defaulted here:
+      /// admin needs to see which pieces are still unweighed, and a number
+      /// standing in for "unknown" hides exactly that.
+      weightGrams: v.weightGrams,
       status: v.status,
       position: v.position,
       stock: v.inventory?.availableStock ?? 0,
@@ -187,6 +191,7 @@ export function toProductDetail(p: ProductDetailRow, { includeInactive = false }
             id: o.id,
             label: o.label,
             price: o.price,
+            weightGrams: o.weightGrams,
             position: o.position,
           })),
 

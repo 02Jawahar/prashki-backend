@@ -63,7 +63,7 @@ export async function createHandler(req: Request, res: Response) {
     const variantDefs =
       input.variants?.length
         ? input.variants
-        : [{ name: 'Default', sku: `${input.sku}-OS`, price: null, stock: 0 }]
+        : [{ name: 'Default', sku: `${input.sku}-OS`, price: null, stock: 0, weightGrams: null }]
 
     for (const [i, def] of variantDefs.entries()) {
       const variant = await tx.productVariant.create({
@@ -72,6 +72,7 @@ export async function createHandler(req: Request, res: Response) {
           name: def.name,
           sku: def.sku,
           price: def.price ?? null,
+          weightGrams: def.weightGrams ?? null,
           position: i,
         },
       })
@@ -243,6 +244,7 @@ export async function createVariantHandler(req: Request, res: Response) {
     sku: string
     price?: number | null
     stock: number
+    weightGrams?: number | null
     status: 'ACTIVE' | 'INACTIVE'
   }
 
@@ -256,6 +258,7 @@ export async function createVariantHandler(req: Request, res: Response) {
         name: input.name,
         sku: input.sku,
         price: input.price ?? null,
+        weightGrams: input.weightGrams ?? null,
         status: input.status,
         position: product.variants.length,
       },
@@ -499,7 +502,9 @@ export async function setComponentsHandler(req: Request, res: Response) {
  */
 export async function setOptionsHandler(req: Request, res: Response) {
   const { id } = req.params as { id: string }
-  const { options } = req.validated!.body as { options: Array<{ label: string; price: number }> }
+  const { options } = req.validated!.body as {
+    options: Array<{ label: string; price: number; weightGrams?: number | null }>
+  }
 
   const product = await prisma.product.findUnique({
     where: { id },
@@ -538,11 +543,22 @@ export async function setOptionsHandler(req: Request, res: Response) {
         keep.add(match.id)
         await tx.productSetOption.update({
           where: { id: match.id },
-          data: { label: option.label, price: option.price, position },
+          data: {
+            label: option.label,
+            price: option.price,
+            weightGrams: option.weightGrams ?? null,
+            position,
+          },
         })
       } else {
         const made = await tx.productSetOption.create({
-          data: { productId: id, label: option.label, price: option.price, position },
+          data: {
+            productId: id,
+            label: option.label,
+            price: option.price,
+            weightGrams: option.weightGrams ?? null,
+            position,
+          },
         })
         keep.add(made.id)
       }

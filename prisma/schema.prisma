@@ -214,6 +214,10 @@ model Product {
   status           ProductStatus @default(DRAFT)
   featured         Boolean       @default(false)
   categoryId       String?
+  /// Where this sits among the others in its category, lowest first. Ties fall
+  /// back to newest-published, so a catalogue nobody has arranged still has a
+  /// sensible order rather than an arbitrary one.
+  position         Int           @default(0)
   publishedAt      DateTime?
   /// Set with status=SCHEDULED; a job flips it to ACTIVE when this passes.
   scheduledFor     DateTime?
@@ -256,6 +260,8 @@ model Product {
   @@index([categoryId])
   @@index([status, featured])
   @@index([status, publishedAt])
+  /// The shop-all ordering walks a category in position order.
+  @@index([categoryId, position])
   @@map("products")
 }
 
@@ -309,6 +315,10 @@ model ProductSetOption {
   label     String
   /// paise. What this choice costs, on its own.
   price     Int
+  /// Shipping weight for this part alone. A top and the full set share a size
+  /// variant but not a parcel, so the weight cannot live on the variant.
+  /// Null falls back to the variant's, then to the store-wide default.
+  weightGrams Int?
   position  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -601,6 +611,10 @@ model OrderItem {
   returnItems   ReturnItem[]
 
   @@index([orderId])
+  /// Created by the product-sets migration but never declared here, so every
+  /// later migration proposed dropping it. The lines of one set are always
+  /// read together, so the index is worth keeping.
+  @@index([setGroupId])
   @@map("order_items")
 }
 

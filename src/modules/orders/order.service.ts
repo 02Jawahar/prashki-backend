@@ -8,7 +8,7 @@ import { emit } from '../../events/bus.js'
 import { findSpendable, redeem as redeemGiftCard } from '../giftcards/giftcard.service.js'
 import { recordAudit } from '../../utils/audit.js'
 import { evaluateCoupon, recordRedemption, releaseRedemption } from '../coupons/coupon.service.js'
-import { priceChosenMethod } from '../shipping/shipping.service.js'
+import { lineWeightGrams, priceChosenMethod } from '../shipping/shipping.service.js'
 
 /**
  * Order creation (spec §25, §50).
@@ -73,7 +73,7 @@ export async function createOrder(input: CreateOrderInput) {
               /** The set a line came from, so the order keeps its name. */
               set: { select: { name: true } },
               /** Which part was bought, snapshotted onto the order line. */
-              setOption: { select: { label: true } },
+              setOption: { select: { label: true, weightGrams: true } },
               variant: {
                 include: {
                   inventory: true,
@@ -177,9 +177,7 @@ export async function createOrder(input: CreateOrderInput) {
        * back afterwards.
        */
       const weightGrams = cart.items.reduce(
-        (total, item) =>
-          total +
-          (item.variant.weightGrams ?? env.SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS) * item.quantity,
+        (total, item) => total + lineWeightGrams(item),
         0,
       )
 

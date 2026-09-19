@@ -147,6 +147,7 @@ export const createProductSchema = z
           sku,
           price: paise.nullable().optional(),
           stock: z.coerce.number().int().min(0).default(0),
+          weightGrams: z.coerce.number().int().min(0).max(200_000).nullable().optional(),
         }),
       )
       .min(1, 'A product needs at least one variant')
@@ -186,6 +187,8 @@ export const createVariantSchema = z.object({
   sku,
   price: paise.nullable().optional(),
   stock: z.coerce.number().int().min(0).default(0),
+  /** Shipping weight in grams. Null leaves the store-wide default standing. */
+  weightGrams: z.coerce.number().int().min(0).max(200_000).nullable().optional(),
   status: z.enum(['ACTIVE', 'INACTIVE']).default('ACTIVE'),
 })
 
@@ -193,6 +196,8 @@ export const updateVariantSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   sku: sku.optional(),
   price: paise.nullable().optional(),
+  /** Shipping weight in grams. Null leaves the store-wide default standing. */
+  weightGrams: z.coerce.number().int().min(0).max(200_000).nullable().optional(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
 })
 
@@ -218,6 +223,12 @@ export const setOptionsSchema = z.object({
          * this says what is wrong while it can still be fixed.
          */
         price: paise.refine((v) => v > 0, { message: 'A part must cost something' }),
+        /**
+         * What this part weighs on its own, so the courier is quoted for the
+         * parcel that actually ships. A top and the full set are the same
+         * size variant and very different boxes.
+         */
+        weightGrams: z.coerce.number().int().min(0).max(200_000).nullable().optional(),
       }),
     )
     .max(8),
