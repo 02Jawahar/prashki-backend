@@ -118,15 +118,29 @@ export interface ResolvedLine {
 /**
  * Turns "the customer chose these sizes" into the lines that go in the bag.
  *
- * Refuses anything that does not hold together: a piece that is not in the set,
- * a size that belongs to a different piece, a piece left unchosen, a garment
- * that is no longer on sale. Every one of these is a way to end up selling
- * something at a price nobody agreed to.
+ * Two prices apply, and which one depends on how much of the set is taken:
+ *
+ *   Every piece — the set's own price, shared across the lines. This is the
+ *   price on the page, and it is normally below what the pieces cost
+ *   separately. Taking the whole look is what earns the saving.
+ *
+ *   Some of the pieces — each at its own price, added up. A top and a pant
+ *   out of a three-piece set costs exactly what the top and the pant cost,
+ *   because the customer has not taken the set.
+ *
+ * The alternative — discounting part of a set pro rata — would let someone
+ * take the two cheapest pieces at set rates and leave the third, which is a
+ * discount on something nobody bought.
+ *
+ * Refuses anything that does not hold together: a piece that is not in the
+ * set, a size that belongs to a different piece, nothing chosen at all, a
+ * garment no longer on sale. Every one of these is a way to sell something at
+ * a price nobody agreed to.
  */
 export async function resolveSetSelection(
   setProductId: string,
   chosen: ChosenPiece[],
-): Promise<{ setName: string; lines: ResolvedLine[] }> {
+): Promise<{ setName: string; whole: boolean; lines: ResolvedLine[] }> {
   const set = await prisma.product.findUnique({
     where: { id: setProductId },
     select: { id: true, name: true, price: true, status: true },
@@ -141,27 +155,34 @@ export async function resolveSetSelection(
     throw new ValidationError('That product is not a set', { code: 'NOT_A_SET' })
   }
 
-  if (chosen.length !== pieces.length) {
-    throw new ValidationError('Please choose a size for every piece', {
-      code: 'SET_INCOMPLETE',
-    })
+  if (chosen.length === 0) {
+    throw new ValidationError('Please choose at least one piece', { code: 'SET_EMPTY' })
   }
 
   const wanted = new Map(chosen.map((c) => [c.productId, c.variantId]))
-  const missing = pieces.filter((piece) => !wanted.has(piece.productId))
-  if (missing.length > 0) {
-    throw new ValidationError(
-      `Please choose a size for ${missing.map((m) => m.name).join(' and ')}`,
-      { code: 'SET_INCOMPLETE' },
-    )
+  if (wanted.size !== chosen.length) {
+    throw new ValidationError('A piece can only be chosen once', { code: 'SET_DUPLICATE_PIECE' })
   }
+
+  const strangers = [...wanted.keys()].filter(
+    (productId) => !pieces.some((piece) => piece.productId === productId),
+  )
+  if (strangers.length > 0) {
+    throw new ValidationError('That piece is not part of this set', {
+      code: 'SET_PIECE_NOT_IN_SET',
+    })
+  }
+
+  /** Only the pieces actually taken, in the set's own order. */
+  const taking = pieces.filter((piece) => wanted.has(piece.productId))
+  const whole = taking.length === pieces.length
 
   const variants = await prisma.productVariant.findMany({
     where: { id: { in: [...wanted.values()] } },
     select: { id: true, productId: true, status: true, product: { select: { status: true } } },
   })
 
-  for (const piece of pieces) {
+  for (const piece of taking) {
     const variantId = wanted.get(piece.productId)!
     const variant = variants.find((v) => v.id === variantId)
 
@@ -179,14 +200,19 @@ export async function resolveSetSelection(
     }
   }
 
-  const shares = allocateSetPrice(
-    set.price,
-    pieces.map((piece) => piece.price),
-  )
+  // The whole look earns the set price; part of it is simply what those
+  // pieces cost.
+  const shares = whole
+    ? allocateSetPrice(
+        set.price,
+        taking.map((piece) => piece.price),
+      )
+    : taking.map((piece) => piece.price)
 
   return {
     setName: set.name,
-    lines: pieces.map((piece, index) => ({
+    whole,
+    lines: taking.map((piece, index) => ({
       variantId: wanted.get(piece.productId)!,
       productId: piece.productId,
       unitPrice: shares[index]!,

@@ -206,11 +206,16 @@ const chosen = pieces.map((piece) => ({
 }))
 
 {
-  const missing = await call('/cart/sets', {
-    method: 'POST', jar: customer,
-    body: { setProductId: setId, pieces: chosen.slice(0, 2) },
+  const none = await call('/cart/sets', {
+    method: 'POST', jar: customer, body: { setProductId: setId, pieces: [] },
   })
-  check('a set with a piece unchosen is refused', missing.status === 422, `status ${missing.status}`)
+  check('choosing nothing is refused', none.status === 422, `status ${none.status}`)
+
+  const stranger2 = await call('/cart/sets', {
+    method: 'POST', jar: customer,
+    body: { setProductId: setId, pieces: [{ productId: stranger.id, variantId: chosen[0].variantId }] },
+  })
+  check('a piece not in the set is refused', stranger2.status === 422, `status ${stranger2.status}`)
 
   // The interesting one: a size that belongs to a different garment would let
   // someone pay a blouse's share for a lehenga.
@@ -267,6 +272,54 @@ const chosen = pieces.map((piece) => ({
     new Set(sameVariant.map((i) => i.unitPrice)).size === 2,
     sameVariant.map((i) => i.unitPrice).join(' vs '),
   )
+}
+
+// ══════════════════════════════════════════════ part of a set
+section('Part of a set', 'Take some of it, pay for what you took')
+
+{
+  const two = chosen.slice(0, 2)
+  const expected = two
+    .map((c) => pieces.find((p) => p.productId === c.productId).price)
+    .reduce((sum, price) => sum + price, 0)
+
+  // The bag already holds the whole set from the section above, so the group
+  // this adds has to be picked out rather than "every set line in the bag".
+  const before = await call('/cart', { jar: customer })
+  const known = new Set(
+    (before.json?.data?.cart?.items ?? []).map((i) => i.setGroupId).filter(Boolean),
+  )
+
+  const added = await call('/cart/sets', {
+    method: 'POST', jar: customer, body: { setProductId: setId, pieces: two },
+  })
+  check('two pieces of three can be bought', added.status === 200, `status ${added.status}`)
+
+  const lines = (added.json?.data?.cart?.items ?? []).filter(
+    (i) => i.setGroupId && !known.has(i.setGroupId),
+  )
+  check('a line for each piece taken', lines.length === 2, `${lines.length} lines`)
+
+  const total = lines.reduce((sum, l) => sum + l.lineTotal, 0)
+  check(
+    'it costs exactly what those pieces cost',
+    total === expected,
+    `${total} vs ${expected}`,
+  )
+  check(
+    'no set discount on a partial set',
+    total > Math.round((setPrice / 3) * 2),
+    `${total} > ${Math.round((setPrice / 3) * 2)}`,
+  )
+  check(
+    'each line is the garment’s own price',
+    lines.every(
+      (l) => l.unitPrice === pieces.find((p) => p.productId === l.productId)?.price,
+    ),
+  )
+
+  // Tidy: this group is separate from the whole-set group added earlier.
+  await call(`/cart/sets/${lines[0]?.setGroupId}`, { method: 'DELETE', jar: customer })
 }
 
 // ══════════════════════════════════════════════ removing
