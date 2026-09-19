@@ -18,10 +18,20 @@ const SORTS: Record<string, Prisma.ProductOrderByWithRelationInput | Prisma.Prod
    * A piece filed under a garment type sorts by that type's parent, because
    * the ranking that matters here is the range, not the shelf within it.
    */
+  /**
+   * The arranged order, and the default.
+   *
+   * Four levels, each answering a question the one above it left open:
+   * featured pieces lead; then the range they belong to; then where they sit
+   * within it; then, for anything nobody has arranged, newest first. That
+   * last one matters - a catalogue where every position is 0 still reads
+   * sensibly rather than falling back to whatever the database returns.
+   */
   featured: [
     { featured: 'desc' },
     { category: { parent: { sortOrder: 'asc' } } },
     { category: { sortOrder: 'asc' } },
+    { position: 'asc' },
     { publishedAt: 'desc' },
   ],
   newest: { publishedAt: 'desc' },
