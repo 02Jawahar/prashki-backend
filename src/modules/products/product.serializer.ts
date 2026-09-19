@@ -29,6 +29,14 @@ export const productListSelect = {
     where: { status: 'ACTIVE' as const },
     select: { id: true, inventory: { select: { availableStock: true } } },
   },
+  /**
+   * Only what a card needs: is this a set, and what is the cheapest way in.
+   * A set shown at its full price alone reads as an expensive single garment,
+   * when the blouse in it might be a third of that.
+   */
+  components: {
+    select: { component: { select: { price: true, status: true } } },
+  },
 } satisfies Prisma.ProductSelect
 
 type ProductListRow = Prisma.ProductGetPayload<{ select: typeof productListSelect }>
@@ -45,6 +53,20 @@ export function toProductListItem(p: ProductListRow) {
     price: p.price,
     compareAtPrice: p.compareAtPrice,
     discountPercent: discountPercent(p.price, p.compareAtPrice),
+    /**
+     * Cheapest piece for a set, so a card can read "from ₹5,000" rather than
+     * only the full-set price. Null for a single garment.
+     */
+    fromPrice:
+      p.components.length > 0
+        ? Math.min(
+            ...p.components
+              .filter((c) => c.component.status === 'ACTIVE')
+              .map((c) => c.component.price),
+            p.price,
+          )
+        : null,
+    isSet: p.components.length > 0,
     status: p.status,
     featured: p.featured,
     ratingAverage: p.ratingAverage,
