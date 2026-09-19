@@ -80,9 +80,12 @@ export async function mergeGuestCart(req: Request, userId: string): Promise<void
         const ceiling = inventory?.availableStock ?? 0
         if (ceiling <= 0) continue
 
-        const existing = await tx.cartItem.findUnique({
-          where: { cartId_variantId: { cartId: userCart.id, variantId: item.variantId } },
-        })
+        // Standalone lines merge; a line that came from a set stays its own.
+        const existing = item.setGroupId
+          ? null
+          : await tx.cartItem.findFirst({
+              where: { cartId: userCart.id, variantId: item.variantId, setGroupId: null },
+            })
 
         const merged = Math.min((existing?.quantity ?? 0) + item.quantity, ceiling)
 
@@ -90,7 +93,15 @@ export async function mergeGuestCart(req: Request, userId: string): Promise<void
           await tx.cartItem.update({ where: { id: existing.id }, data: { quantity: merged } })
         } else {
           await tx.cartItem.create({
-            data: { cartId: userCart.id, variantId: item.variantId, quantity: merged },
+            data: {
+              cartId: userCart.id,
+              variantId: item.variantId,
+              quantity: merged,
+              // A guest's set survives signing in intact.
+              setGroupId: item.setGroupId,
+              setProductId: item.setProductId,
+              setUnitPrice: item.setUnitPrice,
+            },
           })
         }
       }

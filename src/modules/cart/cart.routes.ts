@@ -43,8 +43,11 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
     throw new ConflictError('That item is not available', 'ITEM_UNAVAILABLE')
   }
 
-  const existing = await prisma.cartItem.findUnique({
-    where: { cartId_variantId: { cartId: cart.id, variantId } },
+  // Only a line bought on its own merges. The same garment sitting inside a
+  // set is a different line at a different price, and adding one to the bag
+  // must not quietly raise the quantity of the other.
+  const existing = await prisma.cartItem.findFirst({
+    where: { cartId: cart.id, variantId, setGroupId: null },
   })
 
   const desired = (existing?.quantity ?? 0) + quantity
@@ -58,11 +61,11 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
     )
   }
 
-  await prisma.cartItem.upsert({
-    where: { cartId_variantId: { cartId: cart.id, variantId } },
-    create: { cartId: cart.id, variantId, quantity },
-    update: { quantity: desired },
-  })
+  if (existing) {
+    await prisma.cartItem.update({ where: { id: existing.id }, data: { quantity: desired } })
+  } else {
+    await prisma.cartItem.create({ data: { cartId: cart.id, variantId, quantity } })
+  }
 
   return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })
 })

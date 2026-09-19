@@ -18,6 +18,8 @@ export const cartInclude = {
   items: {
     orderBy: { createdAt: 'asc' },
     include: {
+      /** The set a line came from, for the name shown above its pieces. */
+      set: { select: { id: true, name: true, slug: true } },
       variant: {
         include: {
           inventory: true,
@@ -50,7 +52,13 @@ export async function serializeCart(cart: CartRow, options: SerializeOptions = {
     const { variant } = item
     const { product } = variant
 
-    const unitPrice = variant.price ?? product.price
+    /**
+     * A line that came from a set is charged its share of the set price, not
+     * what the garment costs on its own. Falling back to the standalone price
+     * here would quietly bill the customer the undiscounted total — the set
+     * would look right on the page and be wrong at checkout.
+     */
+    const unitPrice = item.setUnitPrice ?? variant.price ?? product.price
     const stock = variant.inventory?.availableStock ?? 0
 
     // Validation runs on read so a stale cart surfaces problems before checkout.
@@ -92,6 +100,10 @@ export async function serializeCart(cart: CartRow, options: SerializeOptions = {
       discountPercent: discountPercent(unitPrice, product.compareAtPrice),
       availableStock: stock,
       purchasable: !productUnavailable && !variantUnavailable && stock >= item.quantity,
+      /** Set this line belongs to, so the bag can show the pieces together. */
+      setGroupId: item.setGroupId,
+      setName: item.set?.name ?? null,
+      setSlug: item.set?.slug ?? null,
       variant: { id: variant.id, name: variant.name, sku: variant.sku },
       product: {
         id: product.id,

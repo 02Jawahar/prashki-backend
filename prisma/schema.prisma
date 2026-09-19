@@ -244,6 +244,12 @@ model Product {
   showcase    ShowcaseProduct[]
   collections CollectionProduct[]
 
+  /// Pieces this product is made of, when it is a set. Empty for a single garment.
+  cartSetLines CartItem[]         @relation("CartSet")
+  components  ProductComponent[] @relation("SetComponents")
+  /// The sets this piece is sold as part of.
+  partOfSets  ProductComponent[] @relation("ComponentOfSet")
+
   @@index([status])
   @@index([categoryId])
   @@index([status, featured])
@@ -284,6 +290,26 @@ model ProductVariant {
   @@index([productId])
   @@index([status])
   @@map("product_variants")
+}
+
+/// A set and the pieces it is made of (M03).
+///
+/// A set is an ordinary product — it has its own page, price and photographs —
+/// that happens to be assembled from others. Buying it puts one line in the bag
+/// per piece, so stock stays honest and a customer can be sent a different size
+/// on the top than on the bottom.
+model ProductComponent {
+  id                 String @id @default(cuid())
+  setProductId       String
+  componentProductId String
+  position           Int    @default(0)
+
+  set       Product @relation("SetComponents", fields: [setProductId], references: [id], onDelete: Cascade)
+  component Product @relation("ComponentOfSet", fields: [componentProductId], references: [id], onDelete: Cascade)
+
+  @@unique([setProductId, componentProductId])
+  @@index([componentProductId])
+  @@map("product_components")
 }
 
 model ProductImage {
@@ -410,14 +436,29 @@ model CartItem {
   cartId    String
   variantId String
   quantity  Int      @default(1)
+
+  /// Lines added together as one set share a group id, so the bag can show them
+  /// as a set and remove them as one. Null for a piece bought on its own.
+  setGroupId   String?
+  /// The set that was bought, for the name shown above the group.
+  setProductId String?
+  /// This line's share of the set price, in paise. Null when bought alone, and
+  /// the variant's own price applies.
+  setUnitPrice Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
   variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  set     Product?       @relation("CartSet", fields: [setProductId], references: [id], onDelete: SetNull)
 
-  @@unique([cartId, variantId])
+  // Uniqueness only applies to pieces bought on their own — that is what makes
+  // adding the same size twice bump the quantity. Set lines are deliberately
+  // separate rows: the same blouse can be in the bag alone and inside a set,
+  // at different prices. Enforced as a partial index in the migration.
   @@index([cartId])
+  @@index([setGroupId])
   @@map("cart_items")
 }
 
@@ -516,6 +557,11 @@ model OrderItem {
   /// calculated from lineTotal minus this, so a partial return never gives back
   /// more than the customer actually paid.
   discountAllocated Int @default(0)
+
+  /// Lines bought together as one set. Snapshotted like everything else here, so
+  /// an order still reads as a set years after the set itself was withdrawn.
+  setGroupId      String?
+  setNameSnapshot String?
 
   order         Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
   variant       ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
