@@ -585,7 +585,13 @@ export class ShiprocketProvider implements ShippingProvider {
 
   normalizeWebhook(payload: unknown): CarrierEvent {
     const body = payload as {
-      awb?: string
+      /**
+       * A number in their own published sample, not a string. Ours is a string
+       * column, and a number reaching the lookup does not fail to match — it
+       * throws, so the update is recorded as failed and the parcel never
+       * moves. Normalised below rather than trusted.
+       */
+      awb?: string | number
       order_id?: string | number
       shipment_status?: string
       current_status?: string
@@ -594,7 +600,18 @@ export class ShiprocketProvider implements ShippingProvider {
       location?: string
       sr_status_label?: string
       etd?: string
+      /** The tracking history. Where the location and the wording live. */
+      scans?: Array<{ date?: string; activity?: string; location?: string }>
     }
+
+    /**
+     * The most recent scan, which is not reliably the first or last in the
+     * array — their sample is newest-first, and that is not something to
+     * depend on. Sorted by date instead.
+     */
+    const latestScan = [...(body.scans ?? [])]
+      .filter((s) => s?.date)
+      .sort((a, b) => new Date(b.date!).getTime() - new Date(a.date!).getTime())[0]
 
     const providerStatus = String(
       body.shipment_status ?? body.current_status ?? body.sr_status_label ?? '',
@@ -611,7 +628,12 @@ export class ShiprocketProvider implements ShippingProvider {
       )
     }
 
-    const occurredAt = new Date(body.scan_date ?? body.current_timestamp ?? Date.now())
+    const occurredAt = new Date(
+      body.scan_date ?? latestScan?.date ?? body.current_timestamp ?? Date.now(),
+    )
+
+    /** Their own sample sends this as a number; the column is text. */
+    const trackingNumber = body.awb == null ? null : String(body.awb).trim() || null
 
     return {
       /**
@@ -621,15 +643,21 @@ export class ShiprocketProvider implements ShippingProvider {
        */
       eventId: crypto
         .createHash('sha256')
-        .update(`${body.awb ?? body.order_id ?? ''}|${providerStatus}|${occurredAt.toISOString()}`)
+        .update(`${trackingNumber ?? body.order_id ?? ''}|${providerStatus}|${occurredAt.toISOString()}`)
         .digest('hex')
         .slice(0, 32),
-      providerShipmentId: body.order_id ? String(body.order_id) : null,
-      trackingNumber: body.awb ?? null,
+      providerShipmentId: body.order_id == null ? null : String(body.order_id),
+      trackingNumber,
       status,
       providerStatus,
-      message: body.sr_status_label ?? null,
-      location: body.location ?? null,
+      /**
+       * Their sample carries neither a top-level label nor a location — both
+       * live on the scans. Falling back to the newest scan is what puts
+       * "SHIPMENT OUT FOR DELIVERY, PATIALA" on the customer's timeline
+       * instead of a blank line.
+       */
+      message: body.sr_status_label ?? latestScan?.activity ?? null,
+      location: body.location ?? latestScan?.location ?? null,
       occurredAt: Number.isNaN(occurredAt.getTime()) ? new Date() : occurredAt,
       payload,
     }
