@@ -72,6 +72,8 @@ export async function createOrder(input: CreateOrderInput) {
             include: {
               /** The set a line came from, so the order keeps its name. */
               set: { select: { name: true } },
+              /** Which part was bought, snapshotted onto the order line. */
+              setOption: { select: { label: true } },
               variant: {
                 include: {
                   inventory: true,
@@ -120,7 +122,7 @@ export async function createOrder(input: CreateOrderInput) {
         return {
           cartItemId: item.id,
           setGroupId: item.setGroupId,
-          setNameSnapshot: item.set?.name ?? null,
+          setNameSnapshot: item.set?.name ?? item.setOption?.label ?? null,
           categoryId: product.categoryId,
           isDiscounted: product.compareAtPrice !== null && product.compareAtPrice > unitPrice,
           variantId: variant.id,

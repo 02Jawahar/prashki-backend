@@ -172,6 +172,85 @@ section('Assembling', 'What a set may be made of')
   check('a customer cannot assemble one', asCustomer.status === 403, `status ${asCustomer.status}`)
 }
 
+// ══════════════════════════════════════════════ sold in parts
+section('Sold in parts', 'The lighter way, and that the two do not mix')
+
+{
+  const bad = await call(`/admin/products/${stranger.id}/set-options`, {
+    method: 'PUT', jar: admin, body: { options: [{ label: 'Top', price: 500000 }] },
+  })
+  check('one part alone is refused', bad.status === 422, `status ${bad.status}`)
+
+  const dupes = await call(`/admin/products/${stranger.id}/set-options`, {
+    method: 'PUT', jar: admin,
+    body: { options: [{ label: 'Top', price: 500000 }, { label: 'top', price: 600000 }] },
+  })
+  check('two parts with the same name are refused', dupes.status === 422, `status ${dupes.status}`)
+
+  const free = await call(`/admin/products/${stranger.id}/set-options`, {
+    method: 'PUT', jar: admin,
+    body: { options: [{ label: 'Top', price: 0 }, { label: 'Full set', price: 500000 }] },
+  })
+  check('a part priced at nothing is refused', free.status === 422, `status ${free.status}`)
+
+  const saved = await call(`/admin/products/${stranger.id}/set-options`, {
+    method: 'PUT', jar: admin,
+    body: {
+      options: [
+        { label: 'Top', price: 500000 },
+        { label: 'Pant', price: 500000 },
+        { label: 'Full set', price: 900000 },
+      ],
+    },
+  })
+  check('parts save', saved.status === 200, `status ${saved.status}`)
+
+  const page = await call(`/products/${stranger.slug}`)
+  const options = page.json?.data?.product?.setOptions ?? []
+  check('the page offers them in order', options.map((o) => o.label).join(',') === 'Top,Pant,Full set',
+    options.map((o) => o.label).join(','))
+
+  const card = await call(`/products?slugs=${stranger.slug}&perPage=1`)
+  const item = card.json?.data?.products?.[0]
+  check('the card starts at the cheapest part', item?.fromPrice === 500000, String(item?.fromPrice))
+
+  // Buying a part.
+  const size = (page.json?.data?.product?.variants ?? []).find((v) => v.inStock && v.name !== 'Default')
+  const top = options.find((o) => o.label === 'Top')
+  const fullSet = options.find((o) => o.label === 'Full set')
+
+  const noPart = await call('/cart/items', {
+    method: 'POST', jar: customer, body: { variantId: size.id, quantity: 1 },
+  })
+  check('it cannot be bought without saying which part', noPart.status === 409, `status ${noPart.status}`)
+
+  const one = await call('/cart/items', {
+    method: 'POST', jar: customer, body: { variantId: size.id, quantity: 1, setOptionId: top.id },
+  })
+  check('a part can be bought', one.status === 200, `status ${one.status}`)
+  const topLine = (one.json?.data?.cart?.items ?? []).find((i) => i.setOption === 'Top')
+  check('it is priced at that part', topLine?.unitPrice === 500000, String(topLine?.unitPrice))
+
+  const both = await call('/cart/items', {
+    method: 'POST', jar: customer, body: { variantId: size.id, quantity: 1, setOptionId: fullSet.id },
+  })
+  const lines = (both.json?.data?.cart?.items ?? []).filter((i) => i.variantId === size.id)
+  check('the same size as another part is its own line', lines.length === 2, `${lines.length} lines`)
+  check('each at its own price', new Set(lines.map((l) => l.unitPrice)).size === 2,
+    lines.map((l) => l.unitPrice).join(' vs '))
+
+  // The two ways of selling a set must not mix.
+  const mixed = await call(`/admin/products/${setId}/components`, {
+    method: 'PUT', jar: admin, body: { componentProductIds: [stranger.id, a.id] },
+  })
+  check('a piece sold in parts cannot join a set', mixed.status === 422, `status ${mixed.status}`)
+
+  for (const line of lines) await call(`/cart/items/${line.id}`, { method: 'DELETE', jar: customer })
+  await call(`/admin/products/${stranger.id}/set-options`, {
+    method: 'PUT', jar: admin, body: { options: [] },
+  })
+}
+
 // ══════════════════════════════════════════════ the page
 section('The page', 'What a shopper is shown')
 

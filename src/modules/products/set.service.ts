@@ -244,11 +244,19 @@ export async function assertUsableComponents(
 
   const found = await prisma.product.findMany({
     where: { id: { in: componentIds } },
-    select: { id: true, name: true, _count: { select: { components: true } } },
+    select: { id: true, name: true, _count: { select: { components: true, setOptions: true } } },
   })
 
   if (found.length !== componentIds.length) {
     throw new ValidationError('One of those pieces no longer exists', { code: 'SET_PIECE_MISSING' })
+  }
+
+  const inParts = found.filter((p) => p._count.setOptions > 0)
+  if (inParts.length > 0) {
+    throw new ValidationError(
+      `${inParts.map((n) => n.name).join(' and ')} is already sold in parts. A piece of a set is sold whole.`,
+      { code: 'SET_PIECE_SOLD_IN_PARTS' },
+    )
   }
 
   const nested = found.filter((p) => p._count.components > 0)

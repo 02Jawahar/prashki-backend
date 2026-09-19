@@ -37,6 +37,7 @@ export const productListSelect = {
   components: {
     select: { component: { select: { price: true, status: true } } },
   },
+  setOptions: { select: { price: true } },
 } satisfies Prisma.ProductSelect
 
 type ProductListRow = Prisma.ProductGetPayload<{ select: typeof productListSelect }>
@@ -58,15 +59,17 @@ export function toProductListItem(p: ProductListRow) {
      * only the full-set price. Null for a single garment.
      */
     fromPrice:
-      p.components.length > 0
-        ? Math.min(
-            ...p.components
-              .filter((c) => c.component.status === 'ACTIVE')
-              .map((c) => c.component.price),
-            p.price,
-          )
-        : null,
-    isSet: p.components.length > 0,
+      p.setOptions.length > 0
+        ? Math.min(...p.setOptions.map((o) => o.price))
+        : p.components.length > 0
+          ? Math.min(
+              ...p.components
+                .filter((c) => c.component.status === 'ACTIVE')
+                .map((c) => c.component.price),
+              p.price,
+            )
+          : null,
+    isSet: p.components.length > 0 || p.setOptions.length > 0,
     status: p.status,
     featured: p.featured,
     ratingAverage: p.ratingAverage,
@@ -88,6 +91,8 @@ export const productDetailInclude = {
     orderBy: { position: 'asc' },
     include: { inventory: true },
   },
+  /** What may be bought of this product — the whole thing, or part of it. */
+  setOptions: { orderBy: { position: 'asc' as const } },
   /**
    * The pieces a set is made of, each with its own sizes — the page needs a
    * size picker per piece, not one for the whole set.
@@ -170,6 +175,20 @@ export function toProductDetail(p: ProductDetailRow, { includeInactive = false }
       sortOrder: i.sortOrder,
     })),
     variants,
+
+    /**
+     * What can be bought of this product, when it is sold in parts. Null for
+     * an ordinary garment. One size governs whichever part is chosen.
+     */
+    setOptions:
+      p.setOptions.length === 0
+        ? null
+        : p.setOptions.map((o) => ({
+            id: o.id,
+            label: o.label,
+            price: o.price,
+            position: o.position,
+          })),
 
     /**
      * Null for a single garment. When present, the page asks for a size per

@@ -11,6 +11,7 @@ import {
   publishSchema,
   reorderImagesSchema,
   setComponentsSchema,
+  setOptionsSchema,
   updateProductSchema,
   updateVariantSchema,
 } from './product.schemas.js'
@@ -26,6 +27,7 @@ import {
   publishHandler,
   reorderImagesHandler,
   setComponentsHandler,
+  setOptionsHandler,
   updateHandler,
   updateVariantHandler,
   uploadImagesHandler,
@@ -115,6 +117,19 @@ adminProductRouter.put(
   requirePermission('product.update'),
   validate({ body: setComponentsSchema }),
   setComponentsHandler,
+)
+
+/**
+ * What may be bought of this product — "Top", "Full set", each priced.
+ *
+ * An empty list turns it back into an ordinary garment sold whole.
+ */
+adminProductRouter.put(
+  '/:id/set-options',
+  writeLimiter,
+  requirePermission('product.update'),
+  validate({ body: setOptionsSchema }),
+  setOptionsHandler,
 )
 
 // ------------------------------------------------------------------ images

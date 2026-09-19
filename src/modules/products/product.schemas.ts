@@ -200,6 +200,29 @@ export const reorderImagesSchema = z.object({
   imageIds: z.array(z.string().min(1)).min(1),
 })
 
+/**
+ * What may be bought of one product, in the order shown.
+ *
+ * Replaced whole rather than edited row by row: the labels have to stay
+ * unique and the order is meaningful, and a half-applied list is a product
+ * that prices wrongly.
+ */
+export const setOptionsSchema = z.object({
+  options: z
+    .array(
+      z.object({
+        label: z.string().trim().min(1).max(40),
+        /**
+         * Above zero. The database refuses a free part too, but a constraint
+         * violation reaches the user as a 500 with nothing useful in it —
+         * this says what is wrong while it can still be fixed.
+         */
+        price: paise.refine((v) => v > 0, { message: 'A part must cost something' }),
+      }),
+    )
+    .max(8),
+})
+
 /** The pieces a set is assembled from, in the order they should be shown. */
 export const setComponentsSchema = z.object({
   componentProductIds: z.array(z.string().trim().min(1)).max(8),

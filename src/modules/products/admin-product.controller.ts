@@ -487,3 +487,79 @@ export async function setComponentsHandler(req: Request, res: Response) {
 
   return ok(res, { product: await getAdminProductById(id) })
 }
+
+/**
+ * Replaces what may be bought of a product.
+ *
+ * Whole rather than row by row: the labels must stay unique, the order is
+ * meaningful, and a half-applied list is a product that prices wrongly.
+ *
+ * Options already sitting in someone's bag keep their id where the label is
+ * unchanged, so a customer's chosen part is not quietly swapped for another.
+ */
+export async function setOptionsHandler(req: Request, res: Response) {
+  const { id } = req.params as { id: string }
+  const { options } = req.validated!.body as { options: Array<{ label: string; price: number }> }
+
+  const product = await prisma.product.findUnique({
+    where: { id },
+    select: { id: true, _count: { select: { partOfSets: true } } },
+  })
+  if (!product) throw new NotFoundError('Product', 'PRODUCT_NOT_FOUND')
+
+  // The two ways of selling a set do not mix. A garment that is a piece of
+  // another set is bought through that set, which has no place to say which
+  // part of *this* one was meant.
+  if (options.length > 0 && product._count.partOfSets > 0) {
+    throw new ValidationError(
+      'This is a piece of another set, so it is sold whole. Remove it from that set first.',
+      { code: 'SET_OPTION_ON_PIECE' },
+    )
+  }
+
+  const labels = options.map((o) => o.label.toLowerCase())
+  if (new Set(labels).size !== labels.length) {
+    throw new ValidationError('Each part needs its own name', { code: 'SET_OPTION_DUPLICATE' })
+  }
+  if (options.length === 1) {
+    throw new ValidationError(
+      'A product sold in parts needs at least two — otherwise sell it whole.',
+      { code: 'SET_OPTION_TOO_FEW' },
+    )
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.productSetOption.findMany({ where: { productId: id } })
+    const keep = new Set<string>()
+
+    for (const [position, option] of options.entries()) {
+      const match = existing.find((e) => e.label.toLowerCase() === option.label.toLowerCase())
+      if (match) {
+        keep.add(match.id)
+        await tx.productSetOption.update({
+          where: { id: match.id },
+          data: { label: option.label, price: option.price, position },
+        })
+      } else {
+        const made = await tx.productSetOption.create({
+          data: { productId: id, label: option.label, price: option.price, position },
+        })
+        keep.add(made.id)
+      }
+    }
+
+    await tx.productSetOption.deleteMany({
+      where: { productId: id, id: { notIn: [...keep] } },
+    })
+  })
+
+  recordAudit({
+    action: 'PRODUCT_SET_OPTIONS_UPDATED',
+    entityType: 'Product',
+    entityId: id,
+    metadata: { parts: options.length },
+    req,
+  })
+
+  return ok(res, { product: await getAdminProductById(id) })
+}

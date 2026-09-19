@@ -20,6 +20,7 @@ export const cartRouter: Router = Router()
 const addItemSchema = z.object({
   variantId: z.string().trim().min(1),
   quantity: z.coerce.number().int().min(1).max(20).default(1),
+  setOptionId: z.string().trim().min(1).optional(),
 })
 
 const updateItemSchema = z.object({
@@ -32,7 +33,7 @@ cartRouter.get('/', async (req, res) => {
 })
 
 cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) => {
-  const { variantId, quantity } = req.validated!.body as z.infer<typeof addItemSchema>
+  const { variantId, quantity, setOptionId } = req.validated!.body as z.infer<typeof addItemSchema>
   const cart = await resolveCart(req, res)
 
   const variant = await prisma.productVariant.findUnique({
@@ -48,8 +49,33 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
   // Only a line bought on its own merges. The same garment sitting inside a
   // set is a different line at a different price, and adding one to the bag
   // must not quietly raise the quantity of the other.
+  /**
+   * What part of the product is being bought, when it is sold in parts. The
+   * price comes from the option, never from the request — a posted price is a
+   * price the customer chose.
+   */
+  let option = null
+  if (setOptionId) {
+    option = await prisma.productSetOption.findUnique({ where: { id: setOptionId } })
+    if (!option || option.productId !== variant.productId) {
+      throw new ConflictError('That is not a part of this product', 'SET_OPTION_MISMATCH')
+    }
+  } else {
+    // A product sold in parts cannot be bought without saying which part.
+    const parts = await prisma.productSetOption.count({ where: { productId: variant.productId } })
+    if (parts > 0) {
+      throw new ConflictError('Choose which part of the set you would like', 'SET_OPTION_REQUIRED')
+    }
+  }
+
+  // Two parts of a set in the same size are two lines, not one doubled.
   const existing = await prisma.cartItem.findFirst({
-    where: { cartId: cart.id, variantId, setGroupId: null },
+    where: {
+      cartId: cart.id,
+      variantId,
+      setGroupId: null,
+      setOptionId: setOptionId ?? null,
+    },
   })
 
   const desired = (existing?.quantity ?? 0) + quantity
@@ -66,7 +92,15 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
   if (existing) {
     await prisma.cartItem.update({ where: { id: existing.id }, data: { quantity: desired } })
   } else {
-    await prisma.cartItem.create({ data: { cartId: cart.id, variantId, quantity } })
+    await prisma.cartItem.create({
+      data: {
+        cartId: cart.id,
+        variantId,
+        quantity,
+        setOptionId: option?.id ?? null,
+        setUnitPrice: option?.price ?? null,
+      },
+    })
   }
 
   return ok(res, { cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }) })

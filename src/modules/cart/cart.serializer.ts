@@ -20,6 +20,8 @@ export const cartInclude = {
     include: {
       /** The set a line came from, for the name shown above its pieces. */
       set: { select: { id: true, name: true, slug: true } },
+      /** Which part of the product this line is, when it is sold in parts. */
+      setOption: { select: { id: true, label: true } },
       variant: {
         include: {
           inventory: true,
@@ -103,6 +105,8 @@ export async function serializeCart(cart: CartRow, options: SerializeOptions = {
       /** Set this line belongs to, so the bag can show the pieces together. */
       setGroupId: item.setGroupId,
       setName: item.set?.name ?? null,
+      /** "Top", "Full set" — shown beside the size so a bag line is unambiguous. */
+      setOption: item.setOption?.label ?? null,
       setSlug: item.set?.slug ?? null,
       variant: { id: variant.id, name: variant.name, sku: variant.sku },
       product: {
