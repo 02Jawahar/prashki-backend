@@ -1,6 +1,7 @@
 import { prisma } from '../../config/db.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
+import { FakeShippingProvider } from './fake.provider.js'
 import { ShiprocketProvider } from './shiprocket.provider.js'
 import { ManualShippingProvider } from './manual.provider.js'
 import type { ShippingProvider } from './shipping.types.js'
@@ -28,6 +29,12 @@ type AdapterFactory = () => ShippingProvider
 const ADAPTERS: Record<string, AdapterFactory> = {
   manual: () => new ManualShippingProvider(),
   shiprocket: () => new ShiprocketProvider(),
+  /**
+   * A carrier that behaves, for proving the shop's own half. It refuses to
+   * configure itself in production, so a stray SHIPPING_PROVIDER=fake there
+   * books nothing rather than booking parcels nobody collects.
+   */
+  fake: () => new FakeShippingProvider(),
 }
 
 /** Adapters hold state — HTTP agents, cached auth tokens — so one instance each. */

@@ -327,31 +327,39 @@ export class ShiprocketProvider implements ShippingProvider {
     }
   }
 
-  private pickCourier(couriers: CourierQuote[]): CourierQuote | null {
-    if (couriers.length === 0) return null
+  /**
+   * The couriers worth trying, best first.
+   *
+   * A list rather than one choice, because a courier that quotes for a route
+   * can still refuse the individual parcel — a weight it will not take, a hub
+   * that is down, an upstream account problem. Blue Dart quoted the cheapest
+   * rate for a Chennai to Delhi parcel and then answered "Error in generating
+   * awb with bluedart [BD-003]"; Xpressbees, next on the list, took it. Giving
+   * up on the first refusal leaves an order registered with no AWB and a
+   * parcel nobody is collecting.
+   */
+  private rankCouriers(couriers: CourierQuote[]): CourierQuote[] {
+    if (couriers.length === 0) return []
 
-    if (env.SHIPROCKET_COURIER_ID) {
-      const preferred = couriers.find(
-        (c) => String(c.courier_company_id) === env.SHIPROCKET_COURIER_ID,
-      )
-      // A preferred courier that cannot serve this parcel must not silently
-      // become a different one at a different price.
-      if (preferred) return preferred
+    const days = (c: CourierQuote) => Number(c.estimated_delivery_days ?? 99)
+    const byRule =
+      env.SHIPROCKET_COURIER_RULE === 'fastest'
+        ? [...couriers].sort((a, b) => days(a) - days(b) || a.rate - b.rate)
+        : [...couriers].sort((a, b) => a.rate - b.rate || days(a) - days(b))
+
+    if (!env.SHIPROCKET_COURIER_ID) return byRule
+
+    // A preferred courier goes first, but the rest stay behind it as fallbacks
+    // rather than being discarded.
+    const preferred = byRule.find((c) => String(c.courier_company_id) === env.SHIPROCKET_COURIER_ID)
+    if (!preferred) {
       logger.warn(
         { preferred: env.SHIPROCKET_COURIER_ID },
         'Preferred courier does not serve this parcel; falling back to the rule',
       )
+      return byRule
     }
-
-    if (env.SHIPROCKET_COURIER_RULE === 'fastest') {
-      return [...couriers].sort(
-        (a, b) =>
-          Number(a.estimated_delivery_days ?? 99) - Number(b.estimated_delivery_days ?? 99) ||
-          a.rate - b.rate,
-      )[0]!
-    }
-
-    return [...couriers].sort((a, b) => a.rate - b.rate)[0]!
+    return [preferred, ...byRule.filter((c) => c !== preferred)]
   }
 
   async createShipment(input: CreateProviderShipmentInput): Promise<ProviderShipment> {
@@ -421,18 +429,51 @@ export class ShiprocketProvider implements ShippingProvider {
         },
       )
 
-      const courier = this.pickCourier(quotes.data?.available_courier_companies ?? [])
+      const ranked = this.rankCouriers(quotes.data?.available_courier_companies ?? [])
 
-      const awb = await this.call<{
-        response?: { data?: { awb_code?: string; courier_name?: string } }
-      }>('/courier/assign/awb', {
-        method: 'POST',
-        body: {
-          shipment_id: Number(providerShipmentId),
-          ...(courier ? { courier_id: courier.courier_company_id } : {}),
-        },
-      })
+      /**
+       * Down the list until one takes it. Their API answers 200 whether the
+       * courier accepted or refused — the refusal is a string in the body —
+       * so success is "an AWB came back", not "the request did not throw".
+       */
+      let assignedData: { awb_code?: string; courier_name?: string } | null = null
+      let courier: CourierQuote | null = null
+      const refusals: string[] = []
 
+      for (const candidate of ranked.slice(0, 4)) {
+        const attempt = await this.call<{
+          response?: { data?: { awb_code?: string; courier_name?: string } | string }
+        }>('/courier/assign/awb', {
+          method: 'POST',
+          body: {
+            shipment_id: Number(providerShipmentId),
+            courier_id: candidate.courier_company_id,
+          },
+        }).catch((err) => {
+          refusals.push(`${candidate.courier_name}: ${String(err).slice(0, 120)}`)
+          return null
+        })
+
+        const data = attempt?.response?.data
+        if (data && typeof data === 'object' && data.awb_code) {
+          assignedData = data
+          courier = candidate
+          break
+        }
+
+        refusals.push(
+          `${candidate.courier_name}: ${typeof data === 'string' ? data.slice(0, 120) : 'no AWB returned'}`,
+        )
+      }
+
+      if (!assignedData) {
+        logger.error(
+          { providerShipmentId, refusals },
+          'Every courier refused the parcel — the order is registered but has no AWB',
+        )
+      }
+
+      const awb = { response: { data: assignedData } }
       const assigned = awb.response?.data
 
       /**

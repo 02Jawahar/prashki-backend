@@ -725,5 +725,40 @@ section('Authorization')
   check('a customer cannot create a shipping zone', write.status === 403, `status ${write.status}`)
 }
 
+// ══════════════════════════════════════════════ labels
+section('Labels', 'What the shop does when the carrier will not print one')
+
+{
+  /*
+   * The happy path needs a live carrier account — a sandbox mints AWB numbers
+   * and produces no PDF behind them — so what is asserted here is every way it
+   * can fail, which is the half that reaches an operator at four in the
+   * afternoon with a parcel to get out.
+   */
+  const unbooked = await call(`/admin/shipments/${shipmentId}/label`, { method: 'POST', jar: admin })
+  check(
+    'a parcel never booked has no label to fetch',
+    unbooked.status === 409 &&
+      ['SHIPMENT_NOT_BOOKED', 'LABEL_NOT_SUPPORTED', 'LABEL_NOT_READY'].includes(
+        unbooked.json?.error?.code,
+      ),
+    `${unbooked.status} ${unbooked.json?.error?.code ?? ''}`,
+  )
+
+  check(
+    'and it says which, rather than failing silently',
+    typeof unbooked.json?.error?.message === 'string' && unbooked.json.error.message.length > 10,
+    unbooked.json?.error?.message ?? 'no message',
+  )
+
+  const asCustomer = await call(`/admin/shipments/${shipmentId}/label`, {
+    method: 'POST', jar: customer,
+  })
+  check('a customer cannot fetch a label', asCustomer.status === 403, `status ${asCustomer.status}`)
+
+  const missing = await call('/admin/shipments/does-not-exist/label', { method: 'POST', jar: admin })
+  check('a parcel that does not exist is a clean 404', missing.status === 404, `status ${missing.status}`)
+}
+
 console.log(`\n${passed} passed, ${failed} failed\n`)
 process.exit(failed === 0 ? 0 : 1)
