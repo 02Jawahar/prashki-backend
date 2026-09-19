@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import Razorpay from 'razorpay'
-import { env } from '../../config/env.js'
+import { env, isProduction } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 import { IntegrationError, PaymentError } from '../../utils/errors.js'
 import type {
@@ -41,6 +41,26 @@ export class RazorpayProvider implements PaymentProvider {
       throw new IntegrationError(
         'Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.',
         'PAYMENT_NOT_CONFIGURED',
+      )
+    }
+
+    /**
+     * A test key in production takes no money, and nothing about that looks
+     * wrong from either side: the payment window opens, the payment
+     * "succeeds", the order is marked PAID and the confirmation goes out.
+     * Razorpay settles nothing. The customer believes they have bought
+     * something and the studio believes it has been paid.
+     *
+     * Refused here rather than at boot, because this is the only part of the
+     * store that is actually affected. The catalogue, the admin screens and
+     * the carrier callbacks keep working on a test key; only taking money
+     * stops, which is the thing that cannot be allowed to half-work.
+     */
+    if (isProduction && env.RAZORPAY_KEY_ID!.startsWith('rzp_test_')) {
+      throw new IntegrationError(
+        'This store is configured with a Razorpay test key, so no payment can be taken. ' +
+          'Set RAZORPAY_KEY_ID to the live key (rzp_live_…) before accepting orders.',
+        'PAYMENT_TEST_KEY_IN_PRODUCTION',
       )
     }
     this.client ??= new Razorpay({

@@ -7,7 +7,7 @@ try {
   const here = path.dirname(fileURLToPath(import.meta.url))
   process.loadEnvFile(path.resolve(here, '..', '..', '.env'))
 } catch {
-  // no .env file â€” fall back to the real environment
+  // no .env file — fall back to the real environment
 }
 
 const schema = z.object({
@@ -26,7 +26,7 @@ const schema = z.object({
    * "Admin sessions use shorter expiry ... than public sessions").
    *
    * A stolen customer session can place an order. A stolen admin session can
-   * empty the catalogue, read every customer's address and issue refunds â€” so
+   * empty the catalogue, read every customer's address and issue refunds — so
    * it gets a fraction of the lifetime.
    */
   ADMIN_ACCESS_TOKEN_TTL: z.string().default('10m'),
@@ -67,7 +67,7 @@ const schema = z.object({
   EMAIL_FROM: z.string().default('orders@example.com'),
 
   /**
-   * SMTP, which every mail service speaks â€” Brevo, Resend, Mailtrap, Gmail,
+   * SMTP, which every mail service speaks — Brevo, Resend, Mailtrap, Gmail,
    * Amazon SES. One adapter rather than one per vendor, so changing provider
    * is four environment variables and no deploy of new code.
    */
@@ -75,8 +75,8 @@ const schema = z.object({
   SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
   SMTP_USER: z.string().trim().optional(),
   /**
-   * Google shows an app password as four groups of four â€” "msty biow ihan
-   * aemh" â€” because it is easier to read that way. The password is the sixteen
+   * Google shows an app password as four groups of four — "msty biow ihan
+   * aemh" — because it is easier to read that way. The password is the sixteen
    * characters; the spaces are presentation. Pasted verbatim it authenticates
    * as a nineteen-character string and Gmail rejects it, which reads as a
    * wrong password when the credential is perfectly good.
@@ -92,7 +92,7 @@ const schema = z.object({
     ),
   /**
    * Implicit TLS from the first byte (port 465). Port 587 uses STARTTLS, which
-   * is negotiated on a plain connection, so this stays false there â€” setting
+   * is negotiated on a plain connection, so this stays false there — setting
    * it wrong is the usual reason a working password appears to be rejected.
    */
   SMTP_SECURE: z
@@ -103,8 +103,37 @@ const schema = z.object({
   SMS_PROVIDER: z.enum(['noop', 'msg91', 'twilio']).default('noop'),
   WHATSAPP_PROVIDER: z.enum(['noop', 'meta', 'twilio']).default('noop'),
 
+  /** Twilio, shared by the WhatsApp sender below. Both halves or neither. */
+  TWILIO_ACCOUNT_SID: z.string().optional(),
+  TWILIO_AUTH_TOKEN: z.string().optional(),
   /**
-   * Carrier integration. `manual` means parcels are booked by hand â€” the
+   * The sending number in E.164, without Twilio's `whatsapp:` prefix — the
+   * adapter adds it. `+14155238886` is Twilio's shared sandbox number, which
+   * only reaches testers who have joined the sandbox with its code.
+   */
+  TWILIO_WHATSAPP_FROM: z.string().optional(),
+  /**
+   * Absolute URL Twilio calls with delivery receipts. Optional: without it a
+   * message is recorded as sent and never progresses to delivered or read,
+   * because nothing tells us it did.
+   */
+  TWILIO_STATUS_CALLBACK_URL: z.string().url().optional(),
+  /**
+   * Overridable for Twilio's regional edges (api.au1.twilio.com and the like)
+   * and so the adapter can be pointed at a stub in a test.
+   */
+  TWILIO_API_BASE_URL: z.string().url().default('https://api.twilio.com'),
+  /**
+   * Assumed for recipient numbers stored without a country code — most of
+   * them, since checkout asks for a local mobile number.
+   */
+  WHATSAPP_DEFAULT_COUNTRY_CODE: z
+    .string()
+    .regex(/^\d{1,4}$/, 'Digits only, no + prefix')
+    .default('91'),
+
+  /**
+   * Carrier integration. `manual` means parcels are booked by hand — the
    * inbound status webhook still works, verified with the shared secret below.
    */
   SHIPPING_PROVIDER: z.string().default('manual'),
@@ -158,7 +187,7 @@ const schema = z.object({
  * Rules that only apply in production.
  *
  * The base schema has to stay permissive enough for local development, where
- * `change-me` is a perfectly good password. In production it is a way in â€” so
+ * `change-me` is a perfectly good password. In production it is a way in — so
  * the placeholders shipped in `.env.example` are rejected at boot rather than
  * quietly deployed.
  *
@@ -202,7 +231,7 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
   // Cookies are only sent over HTTPS in production; an http:// frontend means
   // the browser will drop the session and the login loop looks like a bug.
   if (env.FRONTEND_URL.startsWith('http://')) {
-    issues.push('FRONTEND_URL must be https:// in production â€” secure cookies are not sent over http')
+    issues.push('FRONTEND_URL must be https:// in production — secure cookies are not sent over http')
   }
 
   /**
@@ -228,7 +257,7 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
     // Most services reject a From address on a domain you have not verified,
     // and the placeholder is the one nobody remembers to change.
     if (env.EMAIL_FROM.includes('example.com')) {
-      issues.push('EMAIL_FROM is still a placeholder â€” set it to an address on a domain you control')
+      issues.push('EMAIL_FROM is still a placeholder — set it to an address on a domain you control')
     }
   }
 
@@ -256,45 +285,51 @@ function productionIssues(env: z.infer<typeof schema>): string[] {
 
   /**
    * Image URLs are written into the database at upload time and never
-   * recomputed, so a placeholder here is not a cosmetic problem â€” every
+   * recomputed, so a placeholder here is not a cosmetic problem — every
    * product photo gets a permanently broken address on a domain nobody owns,
    * and fixing it later means rewriting rows.
    */
   if (env.STORAGE_PUBLIC_URL.includes('example.com')) {
     issues.push(
-      'STORAGE_PUBLIC_URL is still a placeholder â€” image URLs are stored permanently, so fix it before uploading anything',
+      'STORAGE_PUBLIC_URL is still a placeholder — image URLs are stored permanently, so fix it before uploading anything',
     )
   }
 
   /**
-   * A store that cannot take money is not a store, so the selected provider is
-   * checked here rather than at the first checkout.
+   * A misconfigured payment provider is not a reason to refuse the whole
+   * store.
+   *
+   * It was, briefly, and it was wrong: the catalogue, the admin screens and
+   * the carrier webhook all went down over a Razorpay key none of them touch.
+   * A shipping callback has no business failing because of how payments are
+   * configured.
+   *
+   * So the payment problems below are reported where they happen — at
+   * checkout, in `RazorpayProvider` — and the store keeps serving everything
+   * that does not involve taking money.
    */
-  if (env.PAYMENT_PROVIDER !== 'razorpay') {
-    issues.push(
-      `PAYMENT_PROVIDER=${env.PAYMENT_PROVIDER} cannot take real payments — set PAYMENT_PROVIDER=razorpay`,
-    )
-  }
-
   if (env.PAYMENT_PROVIDER === 'razorpay') {
-    /**
-     * A test key is the dangerous misconfiguration, because nothing about it
-     * looks wrong. Every other guard passes, checkout completes, the order is
-     * marked PAID and the confirmation goes out — and no money has moved.
-     * Razorpay names its keys, so this is knowable at boot.
-     */
-    if (env.RAZORPAY_KEY_ID?.startsWith('rzp_test_')) {
-      issues.push(
-        'RAZORPAY_KEY_ID is a test key (rzp_test_) — orders would complete without taking any money. Use the live key.',
-      )
-    }
     if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
       issues.push('PAYMENT_PROVIDER=razorpay requires RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET')
     }
     if (!env.RAZORPAY_WEBHOOK_SECRET) {
       issues.push(
-        'RAZORPAY_WEBHOOK_SECRET is required â€” without it a payment webhook cannot be verified',
+        'RAZORPAY_WEBHOOK_SECRET is required — without it a payment webhook cannot be verified',
       )
+    }
+  }
+
+  /**
+   * Checked here rather than at first send: a missing credential would
+   * otherwise surface as a failed order confirmation, hours after the deploy
+   * that caused it and in front of a customer.
+   */
+  if (env.WHATSAPP_PROVIDER === 'twilio') {
+    if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) {
+      issues.push('WHATSAPP_PROVIDER=twilio requires TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN')
+    }
+    if (!env.TWILIO_WHATSAPP_FROM) {
+      issues.push('WHATSAPP_PROVIDER=twilio requires TWILIO_WHATSAPP_FROM (the sending number)')
     }
   }
 
@@ -316,7 +351,7 @@ const unsafe = productionIssues(parsed.data)
 
 if (unsafe.length > 0) {
   console.error('\nRefusing to start in production:\n')
-  for (const issue of unsafe) console.error(`  â€¢ ${issue}`)
+  for (const issue of unsafe) console.error(`  • ${issue}`)
   console.error('\nFix these in the environment and redeploy.\n')
   process.exit(1)
 }
