@@ -118,6 +118,91 @@ cartRouter.post('/items', validate({ body: addItemSchema }), async (req, res) =>
  * half a set in the bag is worse than nothing, because the customer discovers
  * it at checkout.
  */
+/**
+ * Several parts of one garment, bought together.
+ *
+ * A product sold in parts offers a top, a pant and the whole thing. Choosing
+ * one was all the bag could hold, so somebody who wanted the top and the cape
+ * but not the pant had to add twice and hope the two halves stayed together.
+ *
+ * The lines share a group id, exactly as a set of separate garments does, so
+ * the bag shows them as one purchase and removing one removes all of them. One
+ * size governs every part, because that is what the product page offers and
+ * what the parts share.
+ *
+ * Each part keeps its own price rather than a share of a total: unlike a set
+ * of separate garments, these already have prices of their own, and splitting
+ * a sum across them would invent numbers nobody set.
+ */
+const addPartsSchema = z.object({
+  variantId: z.string().trim().min(1),
+  setOptionIds: z.array(z.string().trim().min(1)).min(1).max(8),
+  quantity: z.coerce.number().int().min(1).max(20).default(1),
+})
+
+cartRouter.post('/parts', validate({ body: addPartsSchema }), async (req, res) => {
+  const cart = await resolveCart(req, res)
+  const { variantId, setOptionIds, quantity } = req.validated!.body as z.infer<typeof addPartsSchema>
+
+  const wanted = [...new Set(setOptionIds)]
+  if (wanted.length !== setOptionIds.length) {
+    throw new ConflictError('The same part is listed twice', 'SET_OPTION_DUPLICATE')
+  }
+
+  const variant = await prisma.productVariant.findUnique({
+    where: { id: variantId },
+    include: { inventory: true, product: { select: { id: true, name: true, status: true } } },
+  })
+  if (!variant) throw new NotFoundError('Variant', 'VARIANT_NOT_FOUND')
+  if (variant.status !== 'ACTIVE' || variant.product.status !== 'ACTIVE') {
+    throw new ConflictError('That item is not available', 'ITEM_UNAVAILABLE')
+  }
+
+  /**
+   * Every price comes from the option rows, never from the request. A posted
+   * price is a price the customer chose.
+   */
+  const options = await prisma.productSetOption.findMany({
+    where: { id: { in: wanted }, productId: variant.productId },
+    orderBy: { position: 'asc' },
+  })
+  if (options.length !== wanted.length) {
+    throw new ConflictError('That is not a part of this product', 'SET_OPTION_MISMATCH')
+  }
+
+  /**
+   * One size, several parts, so the stock check is against that one size for
+   * the whole selection - three parts of an "M" is three of that variant.
+   */
+  const needed = options.length * quantity
+  const stock = variant.inventory?.availableStock ?? 0
+  if (needed > stock) {
+    throw new ConflictError(
+      stock === 0 ? 'That item is out of stock' : `Only ${stock} left in stock`,
+      'INSUFFICIENT_STOCK',
+    )
+  }
+
+  // One id ties the parts together for the whole of their life in the bag.
+  const setGroupId = crypto.randomUUID()
+
+  await prisma.cartItem.createMany({
+    data: options.map((option) => ({
+      cartId: cart.id,
+      variantId,
+      quantity,
+      setGroupId,
+      setProductId: variant.productId,
+      setOptionId: option.id,
+      setUnitPrice: option.price,
+    })),
+  })
+
+  return ok(res, {
+    cart: await serializeCart(await loadCart(cart.id), { userId: req.user?.id ?? null }),
+  })
+})
+
 const addSetSchema = z.object({
   setProductId: z.string().trim().min(1),
   pieces: z
