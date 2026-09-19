@@ -6,6 +6,7 @@ import { emit } from '../../events/bus.js'
 import { recordAudit } from '../../utils/audit.js'
 import { getShippingProvider, type CarrierEvent } from '../../integrations/shipping/index.js'
 import { orderWeightGrams } from '../shipping/shipping.service.js'
+import { readParcelDefaults } from '../shipping/parcel.config.js'
 
 /**
  * Fulfilment (M09).
@@ -406,6 +407,16 @@ export async function bookWithProvider(shipmentId: string) {
   // the operator was already shown on screen.
   const codAmount = shipment.codAmount
 
+  /**
+   * The studio's own box, for a parcel packed without measurements.
+   *
+   * Couriers bill on the greater of actual and volumetric weight, so the
+   * dimensions declared here decide what comes out of the wallet. They used
+   * to be constants inside the adapter; they are settings now, because the
+   * person paying the difference should be the one who chose the number.
+   */
+  const parcelDefaults = await readParcelDefaults()
+
   const booked = await provider.createShipment({
     shipmentNumber: shipment.shipmentNumber,
     orderNumber: shipment.order.orderNumber,
@@ -426,9 +437,9 @@ export async function bookWithProvider(shipmentId: string) {
       unitPrice: item.orderItem.unitPrice,
     })),
     weightGrams: shipment.weightGrams ?? (await orderWeightGrams(shipment.orderId)),
-    lengthMm: shipment.lengthMm,
-    widthMm: shipment.widthMm,
-    heightMm: shipment.heightMm,
+    lengthMm: shipment.lengthMm ?? parcelDefaults.lengthMm,
+    widthMm: shipment.widthMm ?? parcelDefaults.widthMm,
+    heightMm: shipment.heightMm ?? parcelDefaults.heightMm,
     codAmount,
   })
 

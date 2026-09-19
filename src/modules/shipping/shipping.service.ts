@@ -3,6 +3,7 @@ import { prisma } from '../../config/db.js'
 import { logger } from '../../config/logger.js'
 import { getShippingProvider } from '../../integrations/shipping/index.js'
 import { env } from '../../config/env.js'
+import { readParcelDefaults } from './parcel.config.js'
 import { NotFoundError, ValidationError } from '../../utils/errors.js'
 
 /**
@@ -96,41 +97,47 @@ export async function resolveZone(destination: Destination): Promise<ZoneWithMet
  * hub anyway. The default being wrong costs money quietly, which is why it is
  * worth setting these.
  */
-export function lineWeightGrams(item: {
-  quantity: number
-  variant: { weightGrams: number | null }
-  setOption?: { weightGrams: number | null } | null
-}): number {
-  const each =
-    item.setOption?.weightGrams ??
-    item.variant.weightGrams ??
-    env.SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS
+export function lineWeightGrams(
+  item: {
+    quantity: number
+    variant: { weightGrams: number | null }
+    setOption?: { weightGrams: number | null } | null
+  },
+  /** What an unweighed garment is assumed to be — the studio's number, from settings. */
+  fallbackGrams: number,
+): number {
+  const each = item.setOption?.weightGrams ?? item.variant.weightGrams ?? fallbackGrams
 
   return each * item.quantity
 }
 
 export async function cartWeightGrams(cartId: string): Promise<number> {
-  const items = await prisma.cartItem.findMany({
-    where: { cartId },
-    include: {
-      variant: { select: { weightGrams: true } },
-      setOption: { select: { weightGrams: true } },
-    },
-  })
+  const [items, defaults] = await Promise.all([
+    prisma.cartItem.findMany({
+      where: { cartId },
+      include: {
+        variant: { select: { weightGrams: true } },
+        setOption: { select: { weightGrams: true } },
+      },
+    }),
+    readParcelDefaults(),
+  ])
 
-  return items.reduce((total, item) => total + lineWeightGrams(item), 0)
+  return items.reduce((total, item) => total + lineWeightGrams(item, defaults.weightGrams), 0)
 }
 
 /** Same calculation for an order that already exists, used when shipping it. */
 export async function orderWeightGrams(orderId: string): Promise<number> {
-  const items = await prisma.orderItem.findMany({
-    where: { orderId },
-    include: { variant: { select: { weightGrams: true } } },
-  })
+  const [items, defaults] = await Promise.all([
+    prisma.orderItem.findMany({
+      where: { orderId },
+      include: { variant: { select: { weightGrams: true } } },
+    }),
+    readParcelDefaults(),
+  ])
 
   return items.reduce(
-    (total, item) =>
-      total + (item.variant?.weightGrams ?? env.SHIPPING_DEFAULT_ITEM_WEIGHT_GRAMS) * item.quantity,
+    (total, item) => total + (item.variant?.weightGrams ?? defaults.weightGrams) * item.quantity,
     0,
   )
 }

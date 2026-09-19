@@ -16,6 +16,13 @@ import {
   type ServiceabilityResult,
 } from '../../integrations/shipping/index.js'
 import { cartWeightGrams, quoteShipping, resolveZone } from './shipping.service.js'
+import {
+  PARCEL_DEFAULTS_SETTING_KEY,
+  defaultParcel,
+  parcelDefaultsSchema,
+  readParcelDefaults,
+  volumetricGrams,
+} from './parcel.config.js'
 
 /**
  * Delivery options for the current bag (M21).
@@ -484,5 +491,62 @@ adminShippingRouter.delete(
       req,
     })
     return ok(res, { deleted: true })
+  },
+)
+
+/**
+ * The parcel a garment is assumed to be when nobody has said otherwise.
+ *
+ * These were constants in the carrier adapter, which is the wrong place for a
+ * number that decides what the studio is billed. Couriers charge on the
+ * greater of actual and volumetric weight, so an under-declared box is
+ * re-weighed at the hub and the difference taken from the wallet days later,
+ * with nothing connecting it to the order that caused it.
+ */
+adminShippingRouter.get('/parcel-defaults', requirePermission('settings.read'), async (_req, res) => {
+  const defaults = await readParcelDefaults()
+
+  return ok(res, {
+    parcelDefaults: defaults,
+    /**
+     * What the courier will actually bill this box at, so the consequence of
+     * a size is visible while it is being typed rather than in a passbook a
+     * week later.
+     */
+    volumetricGrams: volumetricGrams(defaults),
+    builtIn: defaultParcel(),
+  })
+})
+
+adminShippingRouter.put(
+  '/parcel-defaults',
+  writeLimiter,
+  requirePermission('settings.update'),
+  validate({ body: parcelDefaultsSchema }),
+  async (req, res) => {
+    const input = req.validated!.body as z.infer<typeof parcelDefaultsSchema>
+
+    // Upsert, not update: the row does not exist until somebody sets one.
+    await prisma.setting.upsert({
+      where: { key: PARCEL_DEFAULTS_SETTING_KEY },
+      create: {
+        key: PARCEL_DEFAULTS_SETTING_KEY,
+        value: JSON.stringify(input),
+        type: 'JSON',
+        group: 'shipping',
+        label: 'Default parcel',
+      },
+      update: { value: JSON.stringify(input) },
+    })
+
+    recordAudit({
+      action: 'SHIPPING_PARCEL_DEFAULTS_UPDATED',
+      entityType: 'Setting',
+      entityId: PARCEL_DEFAULTS_SETTING_KEY,
+      metadata: input,
+      req,
+    })
+
+    return ok(res, { parcelDefaults: input, volumetricGrams: volumetricGrams(input) })
   },
 )

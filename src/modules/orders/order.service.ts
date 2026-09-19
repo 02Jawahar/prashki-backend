@@ -9,6 +9,7 @@ import { findSpendable, redeem as redeemGiftCard } from '../giftcards/giftcard.s
 import { recordAudit } from '../../utils/audit.js'
 import { evaluateCoupon, recordRedemption, releaseRedemption } from '../coupons/coupon.service.js'
 import { lineWeightGrams, priceChosenMethod } from '../shipping/shipping.service.js'
+import { readParcelDefaults } from '../shipping/parcel.config.js'
 
 /**
  * Order creation (spec §25, §50).
@@ -176,8 +177,9 @@ export async function createOrder(input: CreateOrderInput) {
        * the same cart lines the order is being built from rather than read
        * back afterwards.
        */
+      const parcelDefaults = await readParcelDefaults()
       const weightGrams = cart.items.reduce(
-        (total, item) => total + lineWeightGrams(item),
+        (total, item) => total + lineWeightGrams(item, parcelDefaults.weightGrams),
         0,
       )
 
