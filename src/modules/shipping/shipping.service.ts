@@ -175,6 +175,17 @@ export interface ShippingQuote {
   /** The list price, so the UI can show "Free" against a struck-through rate. */
   rate: number
   isFree: boolean
+  /**
+   * Whether the delivery was *given away* — a coupon, or an order over the
+   * free-shipping threshold — as opposed to merely costing nothing.
+   *
+   * The difference matters once a carrier prices the method. A flat rate of
+   * zero is a fallback that happens to be free; it is not a promise that this
+   * delivery is free whatever the courier charges. Without the distinction, a
+   * method configured "priced by the cheapest courier" with a zero fallback
+   * quoted the courier's price and then charged nothing for it.
+   */
+  waived: boolean
   isCod: boolean
   codFee: number
   minDays: number | null
@@ -193,7 +204,8 @@ export function priceMethod(
   const { amount, band } = resolveRate(method, weightGrams, subtotal)
 
   const meetsThreshold = method.freeAbove !== null && subtotal >= method.freeAbove
-  const cost = freeShippingCoupon || meetsThreshold ? 0 : amount
+  const waived = freeShippingCoupon || meetsThreshold
+  const cost = waived ? 0 : amount
 
   return {
     id: method.id,
@@ -202,6 +214,7 @@ export function priceMethod(
     cost,
     rate: amount,
     isFree: cost === 0,
+    waived,
     isCod: method.isCod,
     codFee: method.codFee,
     minDays: method.minDays,
@@ -304,18 +317,28 @@ async function applyCarrierRates(
     const quote = quotes.find((q) => q.id === row.id)
     if (!quote) continue
 
-    const rate = rates.find((r) => r.rule === row.carrierRule)
-
     /**
-     * No rate for this rule means the same courier won both, and another
-     * method already has it. The flat rate is left in place rather than
-     * copied across, because two options at one price under two names is a
-     * choice that is not a choice.
+     * The rule's own rate, or whatever the carrier did return.
+     *
+     * No rate for this rule means the same courier won both — on a short
+     * route the cheapest and the quickest are usually the same van. The flat
+     * rate used to stand in that case, which quietly turned a 55-rupee local
+     * delivery into a 350-rupee one under the name "Express". A method asked
+     * to be priced by the carrier is priced by the carrier; where the two
+     * rules collapse into one courier, both options show that courier's
+     * price.
      */
+    const rate = rates.find((r) => r.rule === row.carrierRule) ?? rates[0]
     if (!rate) continue
 
     quote.rate = rate.amount
-    quote.cost = quote.isFree ? 0 : rate.amount
+    /**
+     * The carrier's price is the price. A zero flat rate is a fallback that
+     * happens to cost nothing, not a promise to absorb whatever the courier
+     * charges — only a coupon or the free-shipping threshold does that.
+     */
+    quote.cost = quote.waived ? 0 : rate.amount
+    quote.isFree = quote.cost === 0
     quote.minDays = rate.estimatedDays ?? quote.minDays
     quote.maxDays = rate.estimatedDays ?? quote.maxDays
     quote.rateBand = `${rate.courierName} (${rate.rule})`
