@@ -186,6 +186,25 @@ const methodFields = z.object({
   isCod: z.boolean().default(false),
   codFee: z.coerce.number().int().min(0).default(0),
   /**
+   * Whether the carrier prices this method, and on what basis.
+   *
+   * Null means the flat rate above stands — the studio sets the price and the
+   * carrier is never asked. "cheapest" and "fastest" ask the carrier what it
+   * would charge for this parcel to this PIN code and use that instead, which
+   * is also the only way an address gets checked: a carrier that serves
+   * nowhere near the address returns no rates, and the order is refused rather
+   * than sold at a flat rate nobody can collect.
+   *
+   * It existed from the start with no way to set it, so every store ran on
+   * flat rates whatever its carrier was configured to do.
+   */
+  carrierRule: z
+    .enum(['cheapest', 'fastest'])
+    .nullable()
+    .optional()
+    // The admin form sends "" for "don't ask the carrier".
+    .or(z.literal('').transform(() => null)),
+  /**
    * Which carrier books parcels on this method. Null — or the empty string the
    * admin form sends for "no selection" — means booked by hand, which is a
    * legitimate configuration rather than a missing one.
