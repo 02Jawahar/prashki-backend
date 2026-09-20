@@ -23,6 +23,37 @@ import { on } from './bus.js'
  * When this needs retries and durability, these same handlers move behind
  * BullMQ without the emitters changing.
  */
+
+/**
+ * Where to reach the customer about one order.
+ *
+ * The profile phone is optional and most people never fill it in — eleven of
+ * seventy-three, when this was written. The delivery phone is mandatory,
+ * frozen onto the order, and already given to the courier so they can call
+ * before arriving. Reading only the profile meant every SMS and WhatsApp about
+ * an order was silently skipped for the great majority of customers, with
+ * NO_RECIPIENT in the delivery log and nothing on any screen to say so.
+ *
+ * The profile still wins where it exists: somebody who deliberately entered a
+ * number on their account meant that one, and a delivery address may belong to
+ * whoever is receiving the parcel rather than whoever bought it.
+ *
+ * Worth being clear about what this is for. A delivery phone is given so a
+ * parcel can arrive, which covers telling them about that parcel — and does
+ * not extend to marketing. Transactional messages only.
+ */
+function contactFor(order: {
+  user: { email: string; phone: string | null }
+  shippingAddressSnapshot?: unknown
+}): { email: string; phone: string | null } {
+  const snapshot = order.shippingAddressSnapshot as { phone?: string | null } | null | undefined
+
+  return {
+    email: order.user.email,
+    phone: order.user.phone ?? snapshot?.phone ?? null,
+  }
+}
+
 export function registerEventHandlers(): void {
   on('USER_REGISTERED', async ({ userId, email, name, phone }) => {
     await sendToAllChannels({
@@ -52,7 +83,7 @@ export function registerEventHandlers(): void {
 
     await sendToAllChannels({
       key: 'order.placed',
-      contact: { email: order.user.email, phone: order.user.phone },
+      contact: contactFor(order),
       userId,
       variables,
       entityType: 'Order',
@@ -118,7 +149,7 @@ export function registerEventHandlers(): void {
 
     await sendToAllChannels({
       key: 'order.paid',
-      contact: { email: order.user.email, phone: order.user.phone },
+      contact: contactFor(order),
       userId,
       variables,
       entityType: 'Order',
@@ -155,7 +186,7 @@ export function registerEventHandlers(): void {
 
     await sendToAllChannels({
       key: 'order.shipped',
-      contact: { email: order.user.email, phone: order.user.phone },
+      contact: contactFor(order),
       userId: order.userId,
       variables,
       entityType: 'Order',
@@ -178,7 +209,7 @@ export function registerEventHandlers(): void {
 
     await sendToAllChannels({
       key: 'order.delivered',
-      contact: { email: order.user.email, phone: order.user.phone },
+      contact: contactFor(order),
       userId: order.userId,
       variables: { orderNumber, name: order.user.name },
       entityType: 'Order',
@@ -235,7 +266,7 @@ export function registerEventHandlers(): void {
 
     await sendToAllChannels({
       key: 'order.cancelled',
-      contact: { email: order.user.email, phone: order.user.phone },
+      contact: contactFor(order),
       userId: order.userId,
       variables: { orderNumber, name: order.user.name },
       entityType: 'Order',
