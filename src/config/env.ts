@@ -155,6 +155,24 @@ const schema = z.object({
   SHIPROCKET_SERVICEABILITY_BASE_URL: z.string().url().optional(),
   SHIPROCKET_EMAIL: z.string().optional(),
   SHIPROCKET_PASSWORD: z.string().optional(),
+  /**
+   * The same password, base64-encoded, for when the plain one cannot survive
+   * the journey.
+   *
+   * Shiprocket issues the API password and will not let you choose it, and
+   * the ones it issues contain `#`. In a .env file `#` commonly begins a
+   * comment, so `SHIPROCKET_PASSWORD=abc#def` arrives as `abc` — a wrong
+   * password, retried on every request, until Shiprocket locks the account
+   * with "User blocked due to too many failed login attempts". `$` is the
+   * same story by a different route, expanded away by a shell before anything
+   * reads the file.
+   *
+   * Base64 is letters, digits and `+/=`, none of which any env parser touches.
+   * Set this instead of SHIPROCKET_PASSWORD and the characters arrive intact:
+   *
+   *   node -e "console.log(Buffer.from('your-password').toString('base64'))"
+   */
+  SHIPROCKET_PASSWORD_B64: z.string().optional(),
   /** The pickup address's name in their panel, exactly as spelled there. */
   SHIPROCKET_PICKUP_LOCATION: z.string().optional(),
   /** Where parcels leave from, for rate and serviceability queries. */

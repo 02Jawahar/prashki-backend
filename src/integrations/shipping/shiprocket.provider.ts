@@ -82,9 +82,25 @@ export class ShiprocketProvider implements ShippingProvider {
   private token: string | null = null
   private tokenExpiresAt = 0
 
+  /**
+   * The API password, however it was supplied.
+   *
+   * Shiprocket issues these and will not let you choose them, and they contain
+   * `#` — which begins a comment in most .env parsers, so the value silently
+   * arrives truncated. The base64 form exists for exactly that, and wins when
+   * both are set because somebody who went to the trouble of encoding it meant
+   * the encoded one.
+   */
+  private static password(): string | undefined {
+    if (env.SHIPROCKET_PASSWORD_B64) {
+      return Buffer.from(env.SHIPROCKET_PASSWORD_B64, 'base64').toString('utf8')
+    }
+    return env.SHIPROCKET_PASSWORD
+  }
+
   isConfigured(): boolean {
     return Boolean(
-      env.SHIPROCKET_EMAIL && env.SHIPROCKET_PASSWORD && env.SHIPROCKET_PICKUP_LOCATION,
+      env.SHIPROCKET_EMAIL && ShiprocketProvider.password() && env.SHIPROCKET_PICKUP_LOCATION,
     )
   }
 
@@ -94,7 +110,10 @@ export class ShiprocketProvider implements ShippingProvider {
     const res = await fetch(`${env.SHIPROCKET_BASE_URL}/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ email: env.SHIPROCKET_EMAIL, password: env.SHIPROCKET_PASSWORD }),
+      body: JSON.stringify({
+        email: env.SHIPROCKET_EMAIL,
+        password: ShiprocketProvider.password(),
+      }),
     })
 
     const body: unknown = await res.json().catch(() => null)
@@ -102,10 +121,37 @@ export class ShiprocketProvider implements ShippingProvider {
 
     if (!res.ok || !token) {
       const message = (body as { message?: string } | null)?.message ?? `HTTP ${res.status}`
+
+      /**
+       * Logged as an error, not only thrown.
+       *
+       * Every caller catches this and falls back to a flat rate, which is the
+       * right behaviour for an outage and the wrong behaviour to be silent
+       * about. A store ran for hours quoting flat rates with a Shiprocket
+       * account locked out behind it, and nothing anywhere said so — the
+       * symptom was a price that looked deliberate.
+       */
+      logger.error(
+        { status: res.status, message, baseUrl: env.SHIPROCKET_BASE_URL },
+        'Shiprocket authentication failed — every quote will fall back to the flat rate until this is fixed',
+      )
+
+      /**
+       * Their lockout deserves its own sentence. It is not a wrong password
+       * any more, it is the consequence of one, and the fix is to wait rather
+       * than to keep changing credentials — which extends the block.
+       */
+      const blocked = /blocked|too many failed/i.test(message)
+
       // The base URL is named here on purpose: pointing at the wrong host is
       // the most common cause, and it reports as bad credentials.
       throw new IntegrationError(
-        `Shiprocket refused the credentials (${message}). Check SHIPROCKET_EMAIL and SHIPROCKET_BASE_URL — ${env.SHIPROCKET_BASE_URL}`,
+        blocked
+          ? `Shiprocket has locked this API user after repeated failed logins (${message}). ` +
+            'Wait for the block to clear before retrying, then check the password survived the ' +
+            'environment — one containing # is truncated by most .env parsers, which is what ' +
+            'causes the repeated failures. SHIPROCKET_PASSWORD_B64 avoids that entirely.'
+          : `Shiprocket refused the credentials (${message}). Check SHIPROCKET_EMAIL and SHIPROCKET_BASE_URL — ${env.SHIPROCKET_BASE_URL}`,
         'SHIPROCKET_AUTH_FAILED',
       )
     }
