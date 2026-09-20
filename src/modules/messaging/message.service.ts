@@ -2,6 +2,7 @@ import type { MessageChannel } from '@prisma/client'
 import { prisma } from '../../config/db.js'
 import { logger } from '../../config/logger.js'
 import {
+  type ProviderSendResult,
   getEmailProvider,
   getSmsProvider,
   getWhatsAppProvider,
@@ -87,18 +88,50 @@ export async function sendMessage(input: SendInput): Promise<SendResult> {
   })
 
   try {
-    await dispatch(input.channel, {
+    const result = await dispatch(input.channel, {
       recipient: input.recipient,
       subject: subject ?? '',
       body,
       key: input.key,
       providerTemplateId: template.providerTemplateId,
       variables,
+      declaredVariables: template.variables,
     })
+
+    /**
+     * A seam that logged instead of sending is not a send. Recording it as
+     * SENT put a row in the delivery log saying the customer had been told,
+     * when nothing had left the server — and that log is the only place
+     * anyone looks to find out.
+     */
+    if (!result.transmitted) {
+      logger.warn(
+        { key: input.key, channel: input.channel, provider: result.provider },
+        result.reason ?? 'Message was not transmitted',
+      )
+
+      await prisma.messageLog.update({
+        where: { id: log.id },
+        data: {
+          status: 'FAILED',
+          provider: result.provider,
+          error: result.reason ?? 'The provider did not transmit this message',
+          attempts: { increment: 1 },
+        },
+      })
+
+      return { sent: false, reason: 'PROVIDER_ERROR', logId: log.id }
+    }
 
     await prisma.messageLog.update({
       where: { id: log.id },
-      data: { status: 'SENT', sentAt: new Date(), attempts: { increment: 1 } },
+      data: {
+        status: 'SENT',
+        sentAt: new Date(),
+        provider: result.provider,
+        providerMessageId: result.providerMessageId ?? null,
+        attempts: { increment: 1 },
+      },
     })
 
     return { sent: true, logId: log.id }
@@ -208,13 +241,18 @@ interface DispatchInput {
   key: string
   providerTemplateId: string | null
   variables: Record<string, unknown>
+  /** The placeholders the template declares, in the order it declares them. */
+  declaredVariables: string[]
 }
 
 /** The only place that knows which provider a channel maps to. */
-async function dispatch(channel: MessageChannel, message: DispatchInput): Promise<void> {
+async function dispatch(
+  channel: MessageChannel,
+  message: DispatchInput,
+): Promise<ProviderSendResult> {
   switch (channel) {
     case 'EMAIL':
-      await getEmailProvider().send({
+      return getEmailProvider().send({
         to: message.recipient,
         subject: message.subject,
         // The provider contract predates editable templates; the rendered body
@@ -223,27 +261,31 @@ async function dispatch(channel: MessageChannel, message: DispatchInput): Promis
         template: templateIdFor(message.key),
         data: { ...message.variables, body: message.body },
       })
-      return
 
     case 'SMS':
-      await getSmsProvider().send({
+      return getSmsProvider().send({
         to: message.recipient,
         template: message.providerTemplateId ?? message.key,
         data: { ...message.variables, body: message.body },
+        body: message.body,
+        contentSid: message.providerTemplateId,
+        variableOrder: message.declaredVariables,
       })
-      return
 
     case 'WHATSAPP':
-      await getWhatsAppProvider().send({
+      return getWhatsAppProvider().send({
         to: message.recipient,
         template: message.providerTemplateId ?? message.key,
         data: { ...message.variables, body: message.body },
+        body: message.body,
+        contentSid: message.providerTemplateId,
+        variableOrder: message.declaredVariables,
       })
-      return
 
     case 'IN_APP':
-      // Handled by the notification table, not by a provider.
-      return
+      // Held in the notification table, not carried by a provider — so it is
+      // genuinely delivered the moment the row exists.
+      return { provider: 'in-app', transmitted: true }
   }
 }
 

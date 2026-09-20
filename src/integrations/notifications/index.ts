@@ -11,6 +11,25 @@ import { logger } from '../../config/logger.js'
  * a real provider means implementing one interface — no changes to order logic.
  */
 
+/**
+ * What a provider reports back.
+ *
+ * `transmitted` is the field that matters. A seam that logs instead of sending
+ * returns false, and the delivery log records that rather than "SENT" — a
+ * suppressed message that reads as sent is worse than an obvious failure,
+ * because the one screen an operator checks says the customer was told.
+ */
+export interface ProviderSendResult {
+  /** Which adapter handled it, recorded against the log row. */
+  provider: string
+  /** The provider's own id, where it has one, for reconciliation. */
+  providerMessageId?: string
+  /** False when nothing left this server. */
+  transmitted: boolean
+  /** Why nothing was transmitted, when that is the case. */
+  reason?: string
+}
+
 export interface EmailMessage {
   to: string
   subject: string
@@ -21,23 +40,37 @@ export interface EmailMessage {
 
 export interface EmailProvider {
   readonly name: string
-  send(message: EmailMessage): Promise<void>
+  send(message: EmailMessage): Promise<ProviderSendResult>
 }
 
 export interface SmsMessage {
   to: string
   template: string
   data: Record<string, unknown>
+  /** Rendered text. Used when no approved provider template applies. */
+  body?: string
+  /**
+   * The provider's approved template id — Twilio calls it a Content SID.
+   * WhatsApp forbids free-form business-initiated messages outside a 24-hour
+   * reply window, so for most sends this, not `body`, is what goes out.
+   */
+  contentSid?: string | null
+  /**
+   * The placeholders the template declares, in order. Providers that number
+   * their variables — Twilio's {{1}}, {{2}} — map positionally off this, so
+   * the declared order is the contract rather than object key order.
+   */
+  variableOrder?: string[]
 }
 
 export interface SmsProvider {
   readonly name: string
-  send(message: SmsMessage): Promise<void>
+  send(message: SmsMessage): Promise<ProviderSendResult>
 }
 
 export interface WhatsAppProvider {
   readonly name: string
-  send(message: SmsMessage): Promise<void>
+  send(message: SmsMessage): Promise<ProviderSendResult>
 }
 
 /**
@@ -57,7 +90,7 @@ export interface WhatsAppProvider {
  */
 class ConsoleEmailProvider implements EmailProvider {
   readonly name = 'console'
-  async send(message: EmailMessage): Promise<void> {
+  async send(message: EmailMessage): Promise<ProviderSendResult> {
     const body = typeof message.data?.body === 'string' ? message.data.body : ''
 
     logger.info(
@@ -68,20 +101,39 @@ class ConsoleEmailProvider implements EmailProvider {
         `${body}\n` +
         `───────────────────────────────────────────────────────────`,
     )
+
+    /**
+     * Counted as transmitted, unlike the noop seams below, because printing
+     * the message is this transport's whole purpose rather than a failure to
+     * have one — a developer reads the reset link out of the log and it has
+     * arrived. Using it in production is the real hazard, and
+     * `assertConsoleEmailIsSafe` already says so at boot.
+     */
+    return { provider: this.name, transmitted: true }
   }
 }
 
 class NoopSmsProvider implements SmsProvider {
   readonly name = 'noop'
-  async send(message: SmsMessage): Promise<void> {
+  async send(message: SmsMessage): Promise<ProviderSendResult> {
     logger.debug({ to: message.to, template: message.template }, '[sms] suppressed')
+    return {
+      provider: this.name,
+      transmitted: false,
+      reason: 'SMS_PROVIDER=noop — nothing was sent',
+    }
   }
 }
 
 class NoopWhatsAppProvider implements WhatsAppProvider {
   readonly name = 'noop'
-  async send(message: SmsMessage): Promise<void> {
+  async send(message: SmsMessage): Promise<ProviderSendResult> {
     logger.debug({ to: message.to, template: message.template }, '[whatsapp] suppressed')
+    return {
+      provider: this.name,
+      transmitted: false,
+      reason: 'WHATSAPP_PROVIDER=noop — nothing was sent',
+    }
   }
 }
 
@@ -107,10 +159,10 @@ class SmtpEmailProvider implements EmailProvider {
     auth: { user: env.SMTP_USER!, pass: env.SMTP_PASSWORD! },
   })
 
-  async send(message: EmailMessage): Promise<void> {
+  async send(message: EmailMessage): Promise<ProviderSendResult> {
     const body = typeof message.data?.body === 'string' ? message.data.body : ''
 
-    await this.transport.sendMail({
+    const receipt = await this.transport.sendMail({
       from: env.EMAIL_FROM,
       to: message.to,
       subject: message.subject,
@@ -124,6 +176,8 @@ class SmtpEmailProvider implements EmailProvider {
     })
 
     logger.info({ to: message.to, template: message.template }, 'Email sent')
+
+    return { provider: this.name, providerMessageId: receipt.messageId, transmitted: true }
   }
 
   /** Proves the credentials before a customer's order depends on them. */
@@ -138,7 +192,7 @@ class SmtpEmailProvider implements EmailProvider {
  */
 class UnimplementedEmailProvider implements EmailProvider {
   constructor(readonly name: string) {}
-  async send(): Promise<void> {
+  async send(): Promise<ProviderSendResult> {
     throw new Error(
       `EMAIL_PROVIDER=${this.name} is declared but not implemented. ` +
         `Implement the EmailProvider interface, or set EMAIL_PROVIDER=console.`,
@@ -225,10 +279,197 @@ export async function verifyEmailProvider(): Promise<void> {
   }
 }
 
+/**
+ * WhatsApp over Twilio's REST API.
+ *
+ * `fetch` rather than the Twilio SDK, for the reason SMTP was chosen over a
+ * vendor SDK for email: this is one authenticated POST, and a dependency that
+ * carries its own HTTP stack, retry policy and release cadence is a poor trade
+ * for a form encoder.
+ *
+ * Two ways a message goes out, and the difference is not ours to choose.
+ * WhatsApp only permits a free-form business-initiated message inside the
+ * 24-hour window that opens when the customer last wrote to us. Outside it —
+ * which is every order confirmation — the message must be a template Meta has
+ * already approved. So when the template row carries a Content SID we send
+ * that, and `body` is used only when it does not.
+ */
+class TwilioWhatsAppProvider implements WhatsAppProvider {
+  readonly name = 'twilio'
+
+  async send(message: SmsMessage): Promise<ProviderSendResult> {
+    const to = toWhatsAppAddress(message.to)
+    if (!to) {
+      return {
+        provider: this.name,
+        transmitted: false,
+        reason: `"${message.to}" is not a usable phone number`,
+      }
+    }
+
+    const form = new URLSearchParams({
+      From: toWhatsAppAddress(env.TWILIO_WHATSAPP_FROM!)!,
+      To: to,
+    })
+
+    if (message.contentSid) {
+      form.set('ContentSid', message.contentSid)
+      const variables = positionalVariables(message.data, message.variableOrder)
+      if (variables) form.set('ContentVariables', variables)
+    } else {
+      /**
+       * Only reaches the customer inside the 24-hour window; outside it
+       * Twilio accepts the request and WhatsApp drops the message. Logged so
+       * the silence is explainable — set the template's providerTemplateId to
+       * an approved Content SID to fix it properly.
+       */
+      logger.warn(
+        { template: message.template },
+        'Sending WhatsApp free-form: no Content SID on this template, so it will only ' +
+          'arrive if the customer messaged us in the last 24 hours',
+      )
+      form.set('Body', message.body ?? String(message.data?.body ?? ''))
+    }
+
+    if (env.TWILIO_STATUS_CALLBACK_URL) {
+      form.set('StatusCallback', env.TWILIO_STATUS_CALLBACK_URL)
+    }
+
+    const auth = Buffer.from(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`).toString('base64')
+
+    const response = await fetch(
+      `${env.TWILIO_API_BASE_URL}/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: form,
+        // Twilio is a side effect on an order; it must not hold a request open.
+        signal: AbortSignal.timeout(15_000),
+      },
+    )
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      sid?: string
+      status?: string
+      message?: string
+      code?: number
+    }
+
+    if (!response.ok) {
+      /**
+       * Thrown, not returned: a rejected send is a failure the caller should
+       * log with its error, where `transmitted: false` means "we chose not to
+       * send". Twilio's own message is kept — code 63016 (no template outside
+       * the window) and 21211 (bad number) each need a different fix, and
+       * flattening them into "send failed" hides which.
+       */
+      throw new Error(
+        `Twilio rejected the message (${response.status}` +
+          `${payload.code ? `, code ${payload.code}` : ''}): ${payload.message ?? 'no detail'}`,
+      )
+    }
+
+    logger.info({ sid: payload.sid, status: payload.status }, 'WhatsApp message accepted by Twilio')
+
+    return {
+      provider: this.name,
+      providerMessageId: payload.sid,
+      /**
+       * Accepted by Twilio, which is not the same as delivered to the handset.
+       * The status callback is what moves the row on to delivered or read.
+       */
+      transmitted: true,
+    }
+  }
+}
+
+/**
+ * Normalises to Twilio's `whatsapp:+E164` address.
+ *
+ * Checkout collects whatever the customer types — spaces, brackets, a leading
+ * zero, sometimes the country code and sometimes not. Sending that verbatim
+ * fails with Twilio 21211 and reads, in the log, as though the customer gave a
+ * bad number.
+ */
+function toWhatsAppAddress(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+
+  const hadPlus = trimmed.startsWith('+')
+  let digits = trimmed.replace(/\D/g, '')
+  if (!digits) return null
+
+  if (!hadPlus) {
+    // A single leading zero is trunk notation for a domestic call, not part
+    // of the number.
+    digits = digits.replace(/^0+/, '')
+    // Ten digits in India means the country code was left off, which is how
+    // most people write their own mobile number.
+    if (digits.length <= 10) digits = `${env.WHATSAPP_DEFAULT_COUNTRY_CODE}${digits}`
+  }
+
+  // E.164 allows at most fifteen digits, and a country code is at least one.
+  if (digits.length < 8 || digits.length > 15) return null
+
+  return `whatsapp:+${digits}`
+}
+
+/**
+ * Maps named variables onto Twilio's numbered ones.
+ *
+ * Twilio content templates address variables positionally — {{1}}, {{2}} — so
+ * something has to fix the order. `MessageTemplate.variables` already declares
+ * it, and using that keeps the mapping a stated contract rather than a
+ * dependency on JavaScript object key order.
+ */
+function positionalVariables(
+  data: Record<string, unknown>,
+  order: string[] | undefined,
+): string | null {
+  const names = order?.length ? order : Object.keys(data).filter((k) => k !== 'body')
+  if (names.length === 0) return null
+
+  const mapped: Record<string, string> = {}
+  names.forEach((name, index) => {
+    const value = data[name]
+    mapped[String(index + 1)] = value === undefined || value === null ? '' : String(value)
+  })
+
+  return JSON.stringify(mapped)
+}
+
+/**
+ * Named but unimplemented, on the same principle as the email seam: a channel
+ * the operator has switched on must not quietly drop messages.
+ */
+class UnimplementedProvider implements SmsProvider, WhatsAppProvider {
+  constructor(
+    readonly name: string,
+    private readonly variable: string,
+  ) {}
+  async send(): Promise<ProviderSendResult> {
+    throw new Error(
+      `${this.variable}=${this.name} is declared but not implemented. ` +
+        `Implement the interface, or set ${this.variable}=noop.`,
+    )
+  }
+}
+
 export function getSmsProvider(): SmsProvider {
-  return new NoopSmsProvider()
+  if (env.SMS_PROVIDER === 'noop') return new NoopSmsProvider()
+  return new UnimplementedProvider(env.SMS_PROVIDER, 'SMS_PROVIDER')
 }
 
 export function getWhatsAppProvider(): WhatsAppProvider {
-  return new NoopWhatsAppProvider()
+  switch (env.WHATSAPP_PROVIDER) {
+    case 'twilio':
+      return new TwilioWhatsAppProvider()
+    case 'noop':
+      return new NoopWhatsAppProvider()
+    default:
+      return new UnimplementedProvider(env.WHATSAPP_PROVIDER, 'WHATSAPP_PROVIDER')
+  }
 }
