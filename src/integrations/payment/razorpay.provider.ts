@@ -12,6 +12,7 @@ import type {
   VerifiedPayment,
   VerifyPaymentInput,
   WebhookEvent,
+  ProviderPaymentStatus,
 } from './payment.types.js'
 
 /**
@@ -139,6 +140,62 @@ export class RazorpayProvider implements PaymentProvider {
     } catch (err) {
       logger.error({ err, providerPaymentId: input.providerPaymentId }, 'Razorpay refund failed')
       throw new IntegrationError('The refund could not be sent to the gateway', 'REFUND_FAILED')
+    }
+  }
+
+  /**
+   * What Razorpay says became of an order's payment.
+   *
+   * An order can hold several attempts — a failed card, then a UPI that
+   * worked — so this looks for a captured one first, then an authorised one,
+   * and only reports failure when every attempt failed. Reporting the newest
+   * attempt instead would call an order unpaid because the customer's last
+   * tap happened to be the one that bounced.
+   *
+   * `authorized` is called out rather than treated as paid. The money is held
+   * and not taken, and an authorisation that is never captured releases itself
+   * after a few days — so an order shipped against one is a dress given away.
+   */
+  async lookupOrderPayment(providerOrderId: string): Promise<ProviderPaymentStatus> {
+    try {
+      const response = await this.sdk.orders.fetchPayments(providerOrderId)
+      const payments = (response?.items ?? []) as Array<{
+        id?: string
+        status?: string
+        amount?: number | string
+        method?: string
+        error_description?: string | null
+      }>
+
+      if (payments.length === 0) {
+        return { status: 'none', providerPaymentId: null, amount: null, method: null, detail: null }
+      }
+
+      const pick =
+        payments.find((p) => p.status === 'captured') ??
+        payments.find((p) => p.status === 'authorized') ??
+        payments[payments.length - 1]!
+
+      const status: ProviderPaymentStatus['status'] =
+        pick.status === 'captured'
+          ? 'captured'
+          : pick.status === 'authorized'
+            ? 'authorized'
+            : 'failed'
+
+      return {
+        status,
+        providerPaymentId: pick.id ?? null,
+        amount: pick.amount == null ? null : Number(pick.amount),
+        method: pick.method ?? null,
+        detail: pick.error_description ?? null,
+      }
+    } catch (err) {
+      logger.error({ err, providerOrderId }, 'Razorpay order lookup failed')
+      throw new IntegrationError(
+        'Razorpay could not be asked about this order',
+        'PAYMENT_LOOKUP_FAILED',
+      )
     }
   }
 

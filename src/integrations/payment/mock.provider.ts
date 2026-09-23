@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { env } from '../../config/env.js'
 import type {
+  ProviderPaymentStatus,
   CreateProviderOrderInput,
   PaymentProvider,
   ProviderOrder,
@@ -31,6 +32,53 @@ export class MockPaymentProvider implements PaymentProvider {
 
   isConfigured(): boolean {
     return env.NODE_ENV !== 'production'
+  }
+
+  /**
+   * A stand-in for asking the gateway, so the reconciliation path can be
+   * exercised without a real payment.
+   *
+   * The answer is taken from the order id, because the branches that matter
+   * are the ones that refuse: an authorisation that was never captured, and a
+   * capture for the wrong amount. Both should leave the order alone, and a
+   * test that can only produce the happy path proves the least important one.
+   *
+   *   …ending "auth"  -> authorized, not captured
+   *   …ending "part"  -> captured, but short by a rupee
+   *   …ending "none"  -> no payment at all
+   *   anything else   -> captured in full
+   */
+  async lookupOrderPayment(providerOrderId: string): Promise<ProviderPaymentStatus> {
+    const amount = Number(providerOrderId.match(/_(\d+)$/)?.[1] ?? 0) || null
+
+    if (providerOrderId.endsWith('none')) {
+      return { status: 'none', providerPaymentId: null, amount: null, method: null, detail: null }
+    }
+    if (providerOrderId.endsWith('auth')) {
+      return {
+        status: 'authorized',
+        providerPaymentId: 'pay_mock_authorized',
+        amount,
+        method: 'card',
+        detail: null,
+      }
+    }
+    if (providerOrderId.endsWith('part')) {
+      return {
+        status: 'captured',
+        providerPaymentId: 'pay_mock_partial',
+        amount: amount === null ? 1 : amount - 100,
+        method: 'upi',
+        detail: null,
+      }
+    }
+    return {
+      status: 'captured',
+      providerPaymentId: `pay_mock_${providerOrderId.slice(-8)}`,
+      amount,
+      method: 'upi',
+      detail: null,
+    }
   }
 
   async createOrder(input: CreateProviderOrderInput): Promise<ProviderOrder> {

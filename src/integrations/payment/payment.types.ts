@@ -87,4 +87,33 @@ export interface PaymentProvider {
   normalizeWebhook(payload: unknown): WebhookEvent
   /** Sends money back. Never called from a customer-facing route. */
   refund(input: RefundInput): Promise<ProviderRefund>
+  /**
+   * Asks the provider what actually happened to an order's payment.
+   *
+   * Both the ordinary routes to "paid" can fail silently. The browser
+   * callback does not arrive if the customer closes the tab as the payment
+   * window shuts, and a webhook does not arrive if nobody registered one —
+   * and neither leaves a trace on the order, which sits in pending payment
+   * while the money is already in the account.
+   *
+   * This is the third way to ask, and the only one that does not depend on
+   * something reaching us: the provider is the authority on whether it took
+   * the money, so ask it directly.
+   *
+   * Optional, because a provider without an order lookup is still a usable
+   * provider — callers fall back to saying so rather than failing.
+   */
+  lookupOrderPayment?(providerOrderId: string): Promise<ProviderPaymentStatus>
+}
+
+/** What the provider says about one order's payment, as it stands now. */
+export interface ProviderPaymentStatus {
+  /** Captured means the money has actually moved. */
+  status: 'captured' | 'authorized' | 'failed' | 'none'
+  providerPaymentId: string | null
+  /** Paise, so it can be checked against the order total before anything moves. */
+  amount: number | null
+  method: string | null
+  /** The provider's own words, for an operator reading the result. */
+  detail: string | null
 }

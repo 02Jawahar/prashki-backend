@@ -10,6 +10,8 @@ import { recordAudit } from '../../utils/audit.js'
 import { emit } from '../../events/bus.js'
 import { createOrderIdempotent, orderDetailInclude, updateOrderStatus } from './order.service.js'
 import { forAdmin, forCustomer } from './order.serializer.js'
+import { getPaymentProvider } from '../../integrations/payment/index.js'
+import { announcePaid, markOrderPaid } from '../payments/payment.service.js'
 import { maskContact } from '../../utils/pii.js'
 import { sendCsv, toCsv } from '../../utils/csv.js'
 
@@ -327,5 +329,138 @@ adminOrderRouter.patch(
 
     const order = await prisma.order.findUniqueOrThrow({ where: { id }, include: orderDetailInclude })
     return ok(res, { order: forAdmin(order, req.user?.permissions) })
+  },
+)
+
+/**
+ * Ask the gateway what actually happened to this order's payment.
+ *
+ * An order reaches "paid" by two routes and both can fail without a trace.
+ * The browser callback does not arrive if the customer closes the tab as the
+ * payment window shuts; the webhook does not arrive if nobody registered one,
+ * or if its secret does not match. Either way the money is in the account and
+ * the order sits in pending payment, and the only sign is a customer asking
+ * where their dress is.
+ *
+ * This asks the one party that knows. It changes nothing unless the gateway
+ * says the money was captured AND the amount matches the order to the paisa —
+ * a partial capture, or an authorisation that was never taken, is reported
+ * back rather than acted on. An operator can then decide, which is the right
+ * place for that decision.
+ */
+adminOrderRouter.post(
+  '/:id/reconcile-payment',
+  writeLimiter,
+  requirePermission('order.update_status'),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { payments: { orderBy: { createdAt: 'desc' } } },
+    })
+    if (!order) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
+
+    const provider = getPaymentProvider()
+    if (!provider.lookupOrderPayment) {
+      return ok(res, {
+        outcome: 'unsupported',
+        message: `${provider.name} cannot be asked about an order after the fact.`,
+      })
+    }
+
+    /**
+     * The gateway's own order id, written when the payment was started. Without
+     * one the customer never reached the payment window, so there is nothing
+     * to ask about.
+     */
+    const providerOrderId = order.payments.find((p) => p.providerOrderId)?.providerOrderId
+    if (!providerOrderId) {
+      return ok(res, {
+        outcome: 'never_started',
+        message: 'This order never reached the payment window, so nothing was charged.',
+      })
+    }
+
+    const found = await provider.lookupOrderPayment(providerOrderId)
+
+    recordAudit({
+      action: 'ORDER_PAYMENT_RECONCILED',
+      entityType: 'Order',
+      entityId: id,
+      metadata: { providerOrderId, status: found.status, amount: found.amount },
+      req,
+    })
+
+    if (found.status !== 'captured') {
+      return ok(res, {
+        outcome: found.status,
+        providerPaymentId: found.providerPaymentId,
+        amount: found.amount,
+        message:
+          found.status === 'authorized'
+            ? 'The money is held but not taken. Capture it in the gateway first — an ' +
+              'authorisation that is never captured releases itself after a few days.'
+            : found.status === 'none'
+              ? 'The gateway has no payment for this order. Nothing was charged.'
+              : `The payment did not go through${found.detail ? `: ${found.detail}` : '.'}`,
+      })
+    }
+
+    /**
+     * Captured, but check the amount before believing it. A partial capture
+     * is a real thing, and marking an order paid for less than it costs is
+     * the kind of error nobody notices until the accounts are reconciled.
+     */
+    if (found.amount !== null && found.amount !== order.total) {
+      return ok(res, {
+        outcome: 'amount_mismatch',
+        providerPaymentId: found.providerPaymentId,
+        amount: found.amount,
+        message:
+          `The gateway captured ${found.amount / 100} but this order is ${order.total / 100}. ` +
+          'Left alone deliberately — check it by hand.',
+      })
+    }
+
+    if (order.status !== 'PENDING_PAYMENT') {
+      return ok(res, {
+        outcome: 'already_paid',
+        providerPaymentId: found.providerPaymentId,
+        message: `The gateway confirms payment, and this order is already ${order.status}.`,
+      })
+    }
+
+    const result = await markOrderPaid({
+      orderId: id,
+      providerPaymentId: found.providerPaymentId!,
+      providerOrderId,
+      source: 'reconciliation',
+    })
+
+    // The same announcement the other two routes make, so the customer gets
+    // the confirmation they never received.
+    if (result.changed) {
+      announcePaid({
+        id,
+        orderNumber: order.orderNumber,
+        userId: order.userId,
+        total: order.total,
+      })
+    }
+
+    const updated = await prisma.order.findUniqueOrThrow({
+      where: { id },
+      include: orderDetailInclude,
+    })
+
+    return ok(res, {
+      outcome: 'paid',
+      providerPaymentId: found.providerPaymentId,
+      amount: found.amount,
+      method: found.method,
+      message: `The gateway confirms ${found.method ?? 'the payment'} was captured. Order marked paid.`,
+      order: forAdmin(updated, req.user?.permissions),
+    })
   },
 )

@@ -16,7 +16,13 @@ export async function markOrderPaid(input: {
   orderId: string
   providerPaymentId: string
   providerOrderId?: string
-  source: 'callback' | 'webhook'
+  /**
+   * Which of the three routes confirmed it. `reconciliation` is an operator
+   * asking the gateway directly, after the other two failed to arrive — it
+   * ends up in the order's status history, so a year later it is clear this
+   * one was settled by hand and why.
+   */
+  source: 'callback' | 'webhook' | 'reconciliation'
 }) {
   return prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
