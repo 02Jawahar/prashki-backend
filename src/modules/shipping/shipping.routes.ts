@@ -16,6 +16,7 @@ import {
   type ServiceabilityResult,
 } from '../../integrations/shipping/index.js'
 import { cartWeightGrams, quoteShipping, resolveZone } from './shipping.service.js'
+import { AUTO_BOOK_SETTING_KEY, autoBookEnabled } from '../shipments/auto-book.js'
 import {
   PARCEL_DEFAULTS_SETTING_KEY,
   defaultParcel,
@@ -567,5 +568,49 @@ adminShippingRouter.put(
     })
 
     return ok(res, { parcelDefaults: input, volumetricGrams: volumetricGrams(input) })
+  },
+)
+
+/**
+ * Whether a paid order books itself with the carrier.
+ *
+ * A setting rather than a deploy, because the right answer depends on how the
+ * studio works and can change: a shop dispatching from stock wants the label
+ * waiting, a studio cutting each piece to order does not want an AWB
+ * allocated for a parcel that will not exist for three weeks.
+ */
+adminShippingRouter.get('/auto-book', requirePermission('settings.read'), async (_req, res) => {
+  return ok(res, { autoBook: await autoBookEnabled() })
+})
+
+adminShippingRouter.put(
+  '/auto-book',
+  writeLimiter,
+  requirePermission('settings.update'),
+  validate({ body: z.object({ autoBook: z.boolean() }) }),
+  async (req, res) => {
+    const { autoBook } = req.validated!.body as { autoBook: boolean }
+
+    await prisma.setting.upsert({
+      where: { key: AUTO_BOOK_SETTING_KEY },
+      create: {
+        key: AUTO_BOOK_SETTING_KEY,
+        value: String(autoBook),
+        type: 'BOOLEAN',
+        group: 'shipping',
+        label: 'Book with the carrier on payment',
+      },
+      update: { value: String(autoBook) },
+    })
+
+    recordAudit({
+      action: 'SHIPPING_AUTO_BOOK_UPDATED',
+      entityType: 'Setting',
+      entityId: AUTO_BOOK_SETTING_KEY,
+      metadata: { autoBook },
+      req,
+    })
+
+    return ok(res, { autoBook })
   },
 )

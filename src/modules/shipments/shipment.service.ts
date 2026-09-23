@@ -62,7 +62,12 @@ export interface CreateShipmentInput {
    * (FR-21.3). Ignored when the adapter cannot create shipments.
    */
   bookWithProvider?: boolean
-  actorId: string
+  /**
+   * Who packed it, or null when nothing did — an automatic booking on payment
+   * has no person behind it, and `changedById` is a real foreign key. Naming a
+   * fictional "system" user there violates it and loses the whole booking.
+   */
+  actorId: string | null
 }
 
 export async function createShipment(input: CreateShipmentInput) {

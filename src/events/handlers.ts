@@ -5,6 +5,7 @@ import { formatPaise } from '../utils/money.js'
 import { sendToAllChannels } from '../modules/messaging/message.service.js'
 import { notify, notifyAdmins } from '../modules/notifications/notification.service.js'
 import { on } from './bus.js'
+import { autoBookOnPayment } from '../modules/shipments/auto-book.js'
 
 /**
  * Side effects, wired to business events (spec §43).
@@ -163,6 +164,16 @@ export function registerEventHandlers(): void {
       link: `/account/orders/${orderId}`,
       severity: 'SUCCESS',
     })
+
+    /**
+     * Book the parcel, if the studio has asked for that.
+     *
+     * Deliberately last and deliberately not awaited for its result: the
+     * confirmation email and the customer's notification have already gone,
+     * and a carrier that refuses must not undo them. Its own failures are
+     * logged and announced to admin inside.
+     */
+    void autoBookOnPayment(orderId, orderNumber)
   })
 
   on('ORDER_SHIPPED', async ({ orderId, orderNumber }) => {
