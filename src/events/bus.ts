@@ -31,6 +31,23 @@ export interface EventMap {
   ORDER_CANCELLED: { orderId: string; orderNumber: string }
   ORDER_SHIPPED: { orderId: string; orderNumber: string }
   ORDER_DELIVERED: { orderId: string; orderNumber: string }
+  APPOINTMENT_REQUESTED: {
+    appointmentId: string
+    reference: string
+    name: string
+    email: string
+    phone: string
+    preferredAt: Date
+    notes: string | null
+  }
+  APPOINTMENT_CONFIRMED: {
+    appointmentId: string
+    reference: string
+    name: string
+    email: string
+    phone: string
+    preferredAt: Date
+  }
   RETURN_UPDATED: {
     returnRequestId: string
     returnNumber: string

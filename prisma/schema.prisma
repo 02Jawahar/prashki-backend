@@ -78,6 +78,7 @@ model User {
   giftCards         GiftCard[]
   internalNotes     CustomerNote[]           @relation("CustomerNoteSubject")
   authoredNotes     CustomerNote[]           @relation("CustomerNoteAuthor")
+  appointments      Appointment[]
 
   @@index([role, status])
   @@index([createdAt])
@@ -251,10 +252,10 @@ model Product {
   /// Pieces this product is made of, when it is a set. Empty for a single garment.
   cartSetLines CartItem[]         @relation("CartSet")
   /// What may be bought of this one product — the whole thing, or part of it.
-  setOptions  ProductSetOption[]
-  components  ProductComponent[] @relation("SetComponents")
+  setOptions   ProductSetOption[]
+  components   ProductComponent[] @relation("SetComponents")
   /// The sets this piece is sold as part of.
-  partOfSets  ProductComponent[] @relation("ComponentOfSet")
+  partOfSets   ProductComponent[] @relation("ComponentOfSet")
 
   @@index([status])
   @@index([categoryId])
@@ -309,19 +310,19 @@ model ProductVariant {
 /// One size governs whatever is chosen, and the pieces have no page of their
 /// own. That is the trade for not maintaining four products to sell one look.
 model ProductSetOption {
-  id        String   @id @default(cuid())
-  productId String
+  id          String   @id @default(cuid())
+  productId   String
   /// What the customer sees: "Top", "Full set".
-  label     String
+  label       String
   /// paise. What this choice costs, on its own.
-  price     Int
+  price       Int
   /// Shipping weight for this part alone. A top and the full set share a size
   /// variant but not a parcel, so the weight cannot live on the variant.
   /// Null falls back to the variant's, then to the store-wide default.
   weightGrams Int?
-  position  Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   product   Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
   cartItems CartItem[]
@@ -471,10 +472,10 @@ model Cart {
 }
 
 model CartItem {
-  id        String   @id @default(cuid())
+  id        String @id @default(cuid())
   cartId    String
   variantId String
-  quantity  Int      @default(1)
+  quantity  Int    @default(1)
 
   /// Lines added together as one set share a group id, so the bag can show them
   /// as a set and remove them as one. Null for a piece bought on its own.
@@ -490,8 +491,8 @@ model CartItem {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  cart      Cart              @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant   ProductVariant    @relation(fields: [variantId], references: [id], onDelete: Cascade)
   set       Product?          @relation("CartSet", fields: [setProductId], references: [id], onDelete: SetNull)
   setOption ProductSetOption? @relation(fields: [setOptionId], references: [id], onDelete: SetNull)
 
@@ -983,11 +984,9 @@ model ShippingMethod {
 
   /**
    * How the carrier is chosen when the provider quotes live rates.
-   *
    * Null keeps the flat rate below — the method is priced here and booked
    * by hand. Set, the price shown at checkout is what the carrier quotes for
    * that parcel, and the same rule picks the courier at booking.
-   *
    * The flat rate stays either way. It is what the customer is charged when
    * the carrier cannot be reached, because a checkout that fails because an
    * aggregator is down is worse than one that occasionally under-charges.
@@ -1808,11 +1807,11 @@ enum GiftCardTransactionType {
 /// Append-only. Rows are never updated or deleted — a correction is another
 /// row, the same rule the inventory ledger follows.
 model GiftCardTransaction {
-  id         String                  @id @default(cuid())
-  giftCardId String
-  type       GiftCardTransactionType
+  id           String                  @id @default(cuid())
+  giftCardId   String
+  type         GiftCardTransactionType
   /// paise. Positive adds to the balance, negative takes from it.
-  amount     Int
+  amount       Int
   /// The balance after this row, so a statement needs no running total.
   balanceAfter Int
 
@@ -1964,4 +1963,48 @@ model ShowcaseProduct {
   @@id([showcaseItemId, productId])
   @@index([productId])
   @@map("showcase_products")
+}
+
+/// A consultation for a piece that does not exist yet (M27).
+///
+/// Deliberately not tied to a user account. Somebody commissioning a wedding
+/// lehenga is often doing it before they have ever bought anything, and asking
+/// them to register first loses the enquiry — so the contact details live on
+/// the booking itself, snapshotted, exactly as a delivery address is.
+model Appointment {
+  id          String            @id @default(cuid())
+  reference   String            @unique
+  name        String
+  email       String
+  phone       String
+  /// When the customer asked to be seen. Their choice, not a confirmed slot —
+  /// the studio confirms, which is what moves this to CONFIRMED.
+  preferredAt DateTime
+  /// What they want made, in their own words.
+  notes       String?
+  status      AppointmentStatus @default(REQUESTED)
+  /// Why it was declined or rescheduled, shown to nobody but staff.
+  staffNote   String?
+  /// Set when a signed-in customer books, so their account can show it. Null
+  /// for a guest, which is the common case.
+  userId      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status, preferredAt])
+  @@index([userId])
+  @@map("appointments")
+}
+
+enum AppointmentStatus {
+  /// The customer has asked; nobody has answered yet.
+  REQUESTED
+  /// The studio has agreed the time.
+  CONFIRMED
+  /// It happened.
+  COMPLETED
+  CANCELLED
 }

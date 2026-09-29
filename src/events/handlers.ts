@@ -67,6 +67,46 @@ export function registerEventHandlers(): void {
     })
   })
 
+  /**
+   * A consultation somebody asked for.
+   *
+   * Both halves matter and for different reasons. The customer gets an
+   * acknowledgement because a form that swallows a request feels broken, and
+   * the studio gets one because this is somebody who wants to commission a
+   * piece and is waiting for an answer — it is the most valuable message the
+   * shop receives and it must not sit unseen in a list.
+   */
+  on('APPOINTMENT_REQUESTED', async ({ appointmentId, reference, name, email, phone, preferredAt, notes }) => {
+    const when = formatAppointmentTime(preferredAt)
+
+    await sendToAllChannels({
+      key: 'appointment.requested',
+      contact: { email, phone },
+      variables: { name, reference, preferredAt: when },
+      entityType: 'Appointment',
+      entityId: appointmentId,
+    })
+
+    notifyAdmins({
+      type: 'appointment.requested',
+      title: `Consultation requested — ${name}`,
+      body: `${when} · ${phone}${notes ? ` · ${notes.slice(0, 80)}` : ''}`,
+      link: '/admin/appointments',
+      severity: 'INFO',
+    })
+  })
+
+  /** The studio has agreed the time. The only change the customer hears about. */
+  on('APPOINTMENT_CONFIRMED', async ({ appointmentId, reference, name, email, phone, preferredAt }) => {
+    await sendToAllChannels({
+      key: 'appointment.confirmed',
+      contact: { email, phone },
+      variables: { name, reference, preferredAt: formatAppointmentTime(preferredAt) },
+      entityType: 'Appointment',
+      entityId: appointmentId,
+    })
+  })
+
   on('ORDER_CREATED', async ({ orderId, orderNumber, userId, total }) => {
     const order = await prisma.order.findUnique({
       where: { id: orderId },
@@ -375,5 +415,24 @@ export function registerEventHandlers(): void {
       link: '/admin/inventory',
       severity: availableStock === 0 ? 'ERROR' : 'WARNING',
     })
+  })
+}
+
+/**
+ * The appointment time, written the way a person would say it.
+ *
+ * In the studio's timezone rather than the server's, because the studio is
+ * who keeps the diary — a consultation at "10:00" means ten in Chennai
+ * whatever the container thinks the time is.
+ */
+function formatAppointmentTime(at: Date): string {
+  return at.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
   })
 }

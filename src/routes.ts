@@ -9,6 +9,10 @@ import { addressRouter } from './modules/addresses/address.routes.js'
 import { adminOrderRouter, orderRouter } from './modules/orders/order.routes.js'
 import { paymentRouter } from './modules/payments/payment.routes.js'
 import { webhookRouter } from './modules/webhooks/webhook.routes.js'
+import {
+  adminAppointmentRouter,
+  appointmentRouter,
+} from './modules/appointments/appointment.routes.js'
 import { adminProductRouter } from './modules/products/admin-product.routes.js'
 import { adminCategoryRouter } from './modules/categories/admin-category.routes.js'
 import { adminMediaRouter } from './modules/media/media.routes.js'
@@ -92,6 +96,8 @@ apiRouter.use('/privacy', privacyRouter)
 
 // Authenticated by signature, not by session — see the router for why.
 apiRouter.use('/webhooks', webhookRouter)
+/** Consultations for a commission — open to guests, who are most of them. */
+apiRouter.use('/appointments', appointmentRouter)
 
 /**
  * Store configuration the storefront needs (currency, shipping thresholds,
@@ -137,6 +143,7 @@ adminRouter.use('/categories', adminCategoryRouter)
 adminRouter.use('/media', adminMediaRouter)
 adminRouter.use('/inventory', adminInventoryRouter)
 adminRouter.use('/orders', adminOrderRouter)
+adminRouter.use('/appointments', adminAppointmentRouter)
 adminRouter.use('/coupons', adminCouponRouter)
 adminRouter.use('/shipping', adminShippingRouter)
 adminRouter.use('/shipments', adminShipmentRouter)

@@ -40,6 +40,25 @@ export const MESSAGE_EVENTS: MessageEvent[] = [
     transactional: false,
   },
   {
+    key: 'appointment.requested',
+    label: 'Consultation requested',
+    description: 'Someone asks to see the studio about a commission.',
+    channels: ALL,
+    /**
+     * Transactional: it acknowledges a request the person just made, and a
+     * form that swallows an enquiry in silence reads as broken. It is not
+     * marketing and there is nothing here to opt out of.
+     */
+    transactional: true,
+  },
+  {
+    key: 'appointment.confirmed',
+    label: 'Consultation confirmed',
+    description: 'The studio agrees the time, and the customer is told when and where.',
+    channels: ALL,
+    transactional: true,
+  },
+  {
     key: 'account.password_reset',
     label: 'Password reset',
     description: 'A customer asks to reset their password.',

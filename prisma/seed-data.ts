@@ -1,3 +1,5 @@
+import { APPOINTMENT_TEMPLATES } from '../src/modules/appointments/appointment.templates.js'
+
 /**
  * The definitions the seed and the production bootstrap both need.
  *
@@ -438,6 +440,7 @@ export interface SeedTemplate {
 }
 
 export const MESSAGE_TEMPLATES: SeedTemplate[] = [
+  ...APPOINTMENT_TEMPLATES,
     {
       key: 'account.welcome',
       channel: 'EMAIL',

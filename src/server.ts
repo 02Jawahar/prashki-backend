@@ -8,6 +8,7 @@ import { assertConsoleEmailIsSafe, verifyEmailProvider } from './integrations/no
 import { assertPaymentConfigured } from './integrations/payment/index.js'
 import { assertShippingConfigured } from './integrations/shipping/index.js'
 import { startScheduler, stopScheduler } from './jobs/scheduler.js'
+import { ensureAppointmentTemplates } from './modules/appointments/appointment.templates.js'
 
 // In development the API owns the database lifecycle, so `npm run dev` is the
 // only command needed. In production DATABASE_URL is used as-is.
@@ -42,6 +43,15 @@ try {
   logger.fatal(err instanceof Error ? err.message : String(err))
   process.exit(1)
 }
+
+/**
+ * Templates added in a release have no other way into a live database — the
+ * seed only runs on a fresh one. Missing ones are created; existing ones,
+ * including any an admin has reworded, are left exactly as they are.
+ */
+await ensureAppointmentTemplates().catch((err) =>
+  logger.error({ err }, 'Could not ensure the consultation templates'),
+)
 
 // Subscribe side effects (email, SMS) to business events before serving.
 registerEventHandlers()
