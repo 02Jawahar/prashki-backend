@@ -125,6 +125,32 @@ class NoopSmsProvider implements SmsProvider {
   }
 }
 
+/**
+ * Prints the message instead of sending it, and counts that as delivered.
+ *
+ * Unlike the noop seam below, which reports nothing was transmitted. Both are
+ * useful and they are not the same thing: noop models a channel that is
+ * switched off, this one models a channel that works. A conversation cannot be
+ * exercised locally without a seam that succeeds — on noop every reply is
+ * correctly refused, which tests the refusal and never the reply.
+ *
+ * Never for production: nothing reaches anybody.
+ */
+class LogWhatsAppProvider implements WhatsAppProvider {
+  readonly name = 'log'
+  async send(message: SmsMessage): Promise<ProviderSendResult> {
+    logger.info(
+      { to: message.to, template: message.template, body: message.body },
+      '[whatsapp] would send',
+    )
+    return {
+      provider: this.name,
+      transmitted: true,
+      providerMessageId: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    }
+  }
+}
+
 class NoopWhatsAppProvider implements WhatsAppProvider {
   readonly name = 'noop'
   async send(message: SmsMessage): Promise<ProviderSendResult> {
@@ -467,6 +493,8 @@ export function getWhatsAppProvider(): WhatsAppProvider {
   switch (env.WHATSAPP_PROVIDER) {
     case 'twilio':
       return new TwilioWhatsAppProvider()
+    case 'log':
+      return new LogWhatsAppProvider()
     case 'noop':
       return new NoopWhatsAppProvider()
     default:

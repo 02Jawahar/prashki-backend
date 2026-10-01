@@ -8,6 +8,7 @@ import { created, ok, pageMeta } from '../../utils/response.js'
 import { NotFoundError, ValidationError } from '../../utils/errors.js'
 import { recordAudit } from '../../utils/audit.js'
 import { emit } from '../../events/bus.js'
+import { getThread, sendReply } from '../conversations/conversation.service.js'
 
 /**
  * Consultations for a piece that does not exist yet (M27).
@@ -216,5 +217,66 @@ adminAppointmentRouter.patch(
     }
 
     return ok(res, { appointment })
+  },
+)
+
+// ------------------------------------------------- talking to the customer
+
+/**
+ * The conversation with whoever made this booking (M28).
+ *
+ * Keyed off the booking's phone rather than the booking itself, so a customer
+ * who asked twice has one thread rather than two halves of one.
+ */
+adminAppointmentRouter.get(
+  '/:id/messages',
+  requirePermission('order.read'),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+
+    const appointment = await prisma.appointment.findUnique({
+      where: { id },
+      select: { phone: true },
+    })
+    if (!appointment) throw new NotFoundError('Appointment', 'APPOINTMENT_NOT_FOUND')
+
+    return ok(res, await getThread(appointment.phone))
+  },
+)
+
+const replySchema = z.object({
+  body: z.string().trim().min(1, 'Write something to send').max(1500),
+})
+
+adminAppointmentRouter.post(
+  '/:id/messages',
+  writeLimiter,
+  requirePermission('order.update'),
+  validate({ body: replySchema }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const input = req.validated!.body as z.infer<typeof replySchema>
+
+    const appointment = await prisma.appointment.findUnique({
+      where: { id },
+      select: { phone: true },
+    })
+    if (!appointment) throw new NotFoundError('Appointment', 'APPOINTMENT_NOT_FOUND')
+
+    await sendReply({
+      rawPhone: appointment.phone,
+      body: input.body,
+      actorId: req.user!.id,
+    })
+
+    recordAudit({
+      action: 'APPOINTMENT_REPLIED',
+      entityType: 'Appointment',
+      entityId: id,
+      req,
+    })
+
+    // The whole thread back, so the screen does not have to re-fetch.
+    return ok(res, await getThread(appointment.phone))
   },
 )

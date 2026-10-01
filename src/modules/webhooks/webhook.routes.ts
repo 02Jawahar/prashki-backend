@@ -10,6 +10,9 @@ import {
   type WebhookHeaders,
 } from '../../integrations/shipping/index.js'
 import { processCarrierEvent, processPaymentEvent } from './webhook.service.js'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { env } from '../../config/env.js'
+import { recordInbound } from '../conversations/conversation.service.js'
 import { AppError } from '../../utils/errors.js'
 
 /**
@@ -224,3 +227,85 @@ webhookRouter.post('/parcel-updates', (req, res) => handleCarrierWebhook(req, re
 webhookRouter.post('/parcel-updates/:provider', (req, res) =>
   handleCarrierWebhook(req, res, (req.params as { provider: string }).provider),
 )
+
+/**
+ * Inbound WhatsApp (M28).
+ *
+ * Until this existed, a customer replying to the studio's number reached
+ * Twilio, matched no callback URL, and was dropped — the studio never learned
+ * anyone had written. Everything received now lands in a thread the
+ * consultations screen can show.
+ *
+ * Authenticated by Twilio's signature over the request URL plus the sorted
+ * form fields, the same principle as the Razorpay route above: the signature
+ * is the authentication, so this endpoint sits outside auth deliberately.
+ */
+webhookRouter.post('/whatsapp', async (req, res) => {
+  const token = env.TWILIO_AUTH_TOKEN
+  if (!token) {
+    logger.error('Inbound WhatsApp arrived but TWILIO_AUTH_TOKEN is not set')
+    return res.status(503).type('text/xml').send('<Response/>')
+  }
+
+  const signature = req.get('x-twilio-signature')
+  const params = (req.body ?? {}) as Record<string, string>
+
+  /**
+   * The URL Twilio signed. Behind Traefik the request arrives as plain HTTP on
+   * an internal host, so a URL rebuilt from the socket would not be the one
+   * that was signed. `trust proxy` makes the forwarded headers authoritative,
+   * and TWILIO_WEBHOOK_URL pins it outright when a proxy rewrites the path.
+   */
+  const url = env.TWILIO_WEBHOOK_URL || `${req.protocol}://${req.get('host')}${req.originalUrl}`
+
+  if (!signature || !verifyTwilioSignature(url, params, signature, token)) {
+    logger.warn({ url, hasSignature: Boolean(signature) }, 'Rejected an unsigned inbound WhatsApp')
+    return res.status(403).type('text/xml').send('<Response/>')
+  }
+
+  const from = params.From ?? ''
+  const body = params.Body ?? ''
+  const providerSid = params.MessageSid ?? params.SmsMessageSid ?? ''
+
+  /**
+   * A status callback for something we sent reaches the same URL and carries
+   * no From/Body worth storing. Acknowledged and ignored rather than written
+   * as an empty inbound message.
+   */
+  if (!from || !providerSid || !body.trim()) {
+    return res.status(200).type('text/xml').send('<Response/>')
+  }
+
+  try {
+    const { stored, phone } = await recordInbound({ from, body, providerSid })
+    if (stored) logger.info({ phone }, 'Stored an inbound WhatsApp message')
+  } catch (error) {
+    // Still 200: a failure here means Twilio retries, and a retry that hits
+    // the same bug is a loop. The log is where this gets noticed.
+    logger.error({ err: error }, 'Could not store an inbound WhatsApp message')
+  }
+
+  // An empty TwiML response: received, and nothing auto-replied.
+  return res.status(200).type('text/xml').send('<Response/>')
+})
+
+/**
+ * Twilio signs the request URL with every form field appended to it, sorted by
+ * field name, under HMAC-SHA1 with the account's auth token.
+ */
+function verifyTwilioSignature(
+  url: string,
+  params: Record<string, string>,
+  signature: string,
+  token: string,
+): boolean {
+  const payload = Object.keys(params)
+    .sort()
+    .reduce((acc, key) => acc + key + String(params[key] ?? ''), url)
+
+  const expected = createHmac('sha1', token).update(Buffer.from(payload, 'utf8')).digest('base64')
+
+  const a = Buffer.from(expected)
+  const b = Buffer.from(signature)
+  return a.length === b.length && timingSafeEqual(a, b)
+}

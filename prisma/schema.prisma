@@ -79,6 +79,7 @@ model User {
   internalNotes     CustomerNote[]           @relation("CustomerNoteSubject")
   authoredNotes     CustomerNote[]           @relation("CustomerNoteAuthor")
   appointments      Appointment[]
+  sentWhatsApp      WhatsAppMessage[]
 
   @@index([role, status])
   @@index([createdAt])
@@ -2007,4 +2008,46 @@ enum AppointmentStatus {
   /// It happened.
   COMPLETED
   CANCELLED
+}
+
+/// A WhatsApp message to or from a customer.
+///
+/// The studio needs to talk to somebody about a commission, not only announce
+/// things at them — a consultation is a conversation. Everything the number
+/// has exchanged with one person lives here, keyed by their phone rather than
+/// by a booking, so a customer who books twice has one thread rather than two
+/// halves of one.
+model WhatsAppMessage {
+  id String @id @default(cuid())
+
+  /// E.164 with the leading plus, normalised on the way in. The same customer
+  /// writes their number three different ways across a booking form and a
+  /// WhatsApp address; this is the one spelling a thread is found by.
+  phone     String
+  direction MessageDirection
+  body      String
+
+  /// Twilio's message SID. Unique, so a redelivered webhook writes nothing a
+  /// second time — Twilio retries whenever it does not get a prompt 200.
+  providerSid String? @unique
+
+  /// Delivery state for something we sent. Null for something we received.
+  status String?
+
+  /// The staff member who sent it. Null for inbound, and null for anything the
+  /// system sent on its own.
+  sentById String?
+
+  createdAt DateTime @default(now())
+
+  sentBy User? @relation(fields: [sentById], references: [id], onDelete: SetNull)
+
+  /// The thread query: one person's messages, oldest first.
+  @@index([phone, createdAt])
+  @@map("whatsapp_messages")
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
 }

@@ -101,7 +101,7 @@ const schema = z.object({
     .default('false'),
 
   SMS_PROVIDER: z.enum(['noop', 'msg91', 'twilio']).default('noop'),
-  WHATSAPP_PROVIDER: z.enum(['noop', 'meta', 'twilio']).default('noop'),
+  WHATSAPP_PROVIDER: z.enum(['noop', 'log', 'meta', 'twilio']).default('noop'),
 
   /** Twilio, shared by the WhatsApp sender below. Both halves or neither. */
   TWILIO_ACCOUNT_SID: z.string().optional(),
@@ -123,6 +123,12 @@ const schema = z.object({
    * and so the adapter can be pointed at a stub in a test.
    */
   TWILIO_API_BASE_URL: z.string().url().default('https://api.twilio.com'),
+  /**
+   * The exact URL Twilio signs inbound WhatsApp with. Only needed when a proxy
+   * rewrites the path between Twilio and us — otherwise the forwarded headers
+   * rebuild it correctly.
+   */
+  TWILIO_WEBHOOK_URL: z.string().url().optional().or(z.literal('')),
   /**
    * Assumed for recipient numbers stored without a country code — most of
    * them, since checkout asks for a local mobile number.
