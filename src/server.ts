@@ -9,6 +9,7 @@ import { assertPaymentConfigured } from './integrations/payment/index.js'
 import { assertShippingConfigured } from './integrations/shipping/index.js'
 import { startScheduler, stopScheduler } from './jobs/scheduler.js'
 import { ensureAppointmentTemplates } from './modules/appointments/appointment.templates.js'
+import { ensureContactSettings } from './modules/notifications/contact-settings.js'
 
 // In development the API owns the database lifecycle, so `npm run dev` is the
 // only command needed. In production DATABASE_URL is used as-is.
@@ -51,6 +52,10 @@ try {
  */
 await ensureAppointmentTemplates().catch((err) =>
   logger.error({ err }, 'Could not ensure the consultation templates'),
+)
+
+await ensureContactSettings().catch((err) =>
+  logger.error({ err }, 'Could not ensure the contact settings'),
 )
 
 // Subscribe side effects (email, SMS) to business events before serving.

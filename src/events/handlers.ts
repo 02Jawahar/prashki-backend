@@ -4,6 +4,7 @@ import { logger } from '../config/logger.js'
 import { formatPaise } from '../utils/money.js'
 import { sendToAllChannels } from '../modules/messaging/message.service.js'
 import { notify, notifyAdmins } from '../modules/notifications/notification.service.js'
+import { copyToStudio } from '../modules/notifications/studio-alert.js'
 import { on } from './bus.js'
 import { autoBookOnPayment } from '../modules/shipments/auto-book.js'
 
@@ -146,6 +147,18 @@ export function registerEventHandlers(): void {
       body: `${order.user.name} — ${formatPaise(total)}`,
       link: `/admin/orders/${orderId}`,
       severity: 'INFO',
+    })
+
+    /**
+     * And onto the studio's phone. The bell above only reaches somebody
+     * already at the screen, and an order arriving at nine in the evening
+     * should not wait until somebody next opens the dashboard.
+     */
+    await copyToStudio({
+      key: 'order.placed',
+      variables,
+      entityType: 'Order',
+      entityId: orderId,
     })
   })
 
