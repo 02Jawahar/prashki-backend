@@ -91,8 +91,62 @@ check(
   `${sent?.entityType}/${sent?.entityId}`,
 )
 
+section('A consultation request')
+/*
+ * Arrange the template first. ensureAppointmentTemplates creates the WhatsApp
+ * copies inactive — they cannot deliver without an approved Content SID — and
+ * production was switched on by hand once Meta approved. A local database is
+ * therefore still off, and a test that failed for that reason would be
+ * reporting the environment, not the code. Restored at the end.
+ */
+const apptTemplate = await db.messageTemplate.findUnique({
+  where: { key_channel: { key: 'appointment.requested', channel: 'WHATSAPP' } },
+})
+if (apptTemplate) {
+  await db.messageTemplate.update({
+    where: { id: apptTemplate.id },
+    data: { isActive: true, providerTemplateId: apptTemplate.providerTemplateId ?? 'HXsmoketemplate' },
+  })
+}
+
+/*
+ * Copied for a different reason than an order: nothing has been bought, but
+ * somebody is waiting to hear back and WhatsApp only permits a free reply for
+ * 24 hours after they wrote. A request nobody sees until morning has spent a
+ * third of that window.
+ */
+await copyToStudio({
+  key: 'appointment.requested',
+  variables: { name: 'Meera', reference: 'PK-C-SMOKE', preferredAt: 'Thursday, 11:00 am' },
+  entityType: 'Appointment',
+  entityId: 'smoke-appt',
+})
+const appt = await db.messageLog.findFirst({
+  where: { channel: 'WHATSAPP', entityId: 'smoke-appt' },
+  orderBy: { createdAt: 'desc' },
+})
+check('reaches the studio too', appt?.status === 'SENT', appt?.error ?? '')
+check('and to the same number', [STUDIO, digits].includes(appt?.recipient ?? ''), appt?.recipient ?? '')
+
+section('Events we deliberately do not copy')
+/*
+ * Shipped and confirmed are things the studio itself did. Copying them back is
+ * noise, and noise is how somebody learns to ignore the alerts that matter.
+ */
+for (const key of ['order.shipped', 'appointment.confirmed']) {
+  const n = await db.messageLog.count({ where: { channel: 'WHATSAPP', recipient: { in: [STUDIO, digits] }, template: { key } } })
+  check(`${key} is not copied`, n === 0, 'the studio caused it')
+}
+
 section('Cleanup')
 await db.messageLog.deleteMany({ where: { recipient: { in: [STUDIO, digits] } } })
+await db.messageLog.deleteMany({ where: { entityId: { in: ['smoke', 'smoke-appt'] } } })
+if (apptTemplate) {
+  await db.messageTemplate.update({
+    where: { id: apptTemplate.id },
+    data: { isActive: apptTemplate.isActive, providerTemplateId: apptTemplate.providerTemplateId },
+  })
+}
 if (before) {
   await db.setting.update({ where: { key: STUDIO_WHATSAPP_KEY }, data: { value: before.value } })
 } else {

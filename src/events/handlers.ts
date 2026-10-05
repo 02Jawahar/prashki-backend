@@ -95,6 +95,18 @@ export function registerEventHandlers(): void {
       link: '/admin/appointments',
       severity: 'INFO',
     })
+
+    /**
+     * And onto the studio's phone. More urgent than an order, despite being
+     * worth nothing yet: somebody is waiting to hear back, and WhatsApp only
+     * lets us answer freely for 24 hours after they wrote.
+     */
+    await copyToStudio({
+      key: 'appointment.requested',
+      variables: { name, reference, preferredAt: when },
+      entityType: 'Appointment',
+      entityId: appointmentId,
+    })
   })
 
   /** The studio has agreed the time. The only change the customer hears about. */
