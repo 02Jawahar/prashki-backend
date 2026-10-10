@@ -464,3 +464,114 @@ adminOrderRouter.post(
     })
   },
 )
+
+/**
+ * Permanently removing an order.
+ *
+ * Exists for one job: clearing the test orders a build leaves behind in a
+ * production database before real customers arrive. It is not an undo, and it
+ * is not how a mistaken order is handled — cancelling is, and that keeps the
+ * record.
+ *
+ * Everything hanging off the order goes with it: items, status history,
+ * payments, shipments, returns, refunds, coupon redemptions. Those all cascade
+ * at the database level, so this cannot leave half an order behind.
+ *
+ * Two things it deliberately does NOT do.
+ *
+ * It does not put stock back. The inventory ledger is append-only and its link
+ * to an order is loose — by entity id rather than a foreign key — so deleting
+ * an order leaves its ledger entries standing as the historical record they
+ * are. Stock is adjusted in the admin, deliberately, by somebody who has
+ * counted the rail.
+ *
+ * It does not reach the payment gateway. A captured payment at Razorpay is
+ * theirs, not ours, and stays on the statement long after this row is gone —
+ * which is exactly why a captured order has to be forced.
+ */
+const deleteOrderSchema = z.object({
+  /**
+   * Typed in full, verbatim. What a mis-click costs here is a financial record
+   * that cannot be recovered from anywhere in this system.
+   */
+  confirm: z.literal('DELETE'),
+  /**
+   * Only an order whose money actually moved needs this, and it is separate
+   * from `confirm` on purpose: agreeing that you meant to delete something is
+   * a different question from accepting that real money left a real card and
+   * the only remaining trace will be at the gateway.
+   */
+  force: z.boolean().optional(),
+})
+
+adminOrderRouter.post(
+  '/:id/delete',
+  writeLimiter,
+  requirePermission('order.cancel'),
+  validate({ body: deleteOrderSchema }),
+  async (req, res) => {
+    const { id } = req.params as { id: string }
+    const input = req.validated!.body as z.infer<typeof deleteOrderSchema>
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        payments: true,
+        items: { select: { id: true } },
+        shipments: { select: { id: true, trackingNumber: true } },
+      },
+    })
+    if (!order) throw new NotFoundError('Order', 'ORDER_NOT_FOUND')
+
+    const captured = order.payments.filter((p) => p.status === 'CAPTURED')
+
+    if (captured.length > 0 && !input.force) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ORDER_HAS_CAPTURED_PAYMENT',
+          message:
+            'Money was actually taken for this order. Deleting it leaves a payment at the ' +
+            'gateway with nothing here to reconcile against. Pass force to proceed anyway.',
+          details: captured.map((p) => ({
+            providerPaymentId: p.providerPaymentId,
+            amount: p.amount,
+          })),
+        },
+      })
+    }
+
+    /**
+     * Written before the delete, not after. Once the row is gone there is
+     * nothing left to describe it, and this audit entry becomes the only place
+     * the order still exists.
+     */
+    recordAudit({
+      action: 'ORDER_DELETED',
+      entityType: 'Order',
+      entityId: id,
+      metadata: {
+        orderNumber: order.orderNumber,
+        status: order.status,
+        total: order.total,
+        itemCount: order.items.length,
+        shipments: order.shipments.map((s) => s.trackingNumber).filter(Boolean),
+        capturedPayments: captured.map((p) => ({
+          providerPaymentId: p.providerPaymentId,
+          amount: p.amount,
+        })),
+        forced: Boolean(input.force),
+      },
+      req,
+    })
+
+    await prisma.order.delete({ where: { id } })
+
+    return ok(res, {
+      deleted: true,
+      orderNumber: order.orderNumber,
+      // Handed back so an operator can reconcile them against the statement.
+      capturedPayments: captured.map((p) => p.providerPaymentId),
+    })
+  },
+)
